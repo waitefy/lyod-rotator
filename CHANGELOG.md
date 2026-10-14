@@ -5,7 +5,7 @@
 - Reject unsupported tools/media/structured output; publish limited capabilities and unavailable usage in the model catalog.
 - Isolate browser-session errors from other account credentials. Add mock worker, routing and protocol tests, setup documentation and a separate Dockerfile.
 - Preserve the deployed UTF-8 stream decoder, public-host logging and disabled-model diagnostic fixes.
-- Real Argon generation remains unverified until an eligible Gemini App session is supplied. No production deployment in this change.
+- Verify real Argon generation through the worker and OpenAI Chat Completions locally and in a server smoke container. Treat guest sessions after cookie expiry as provider-scoped authentication errors.
 
 # Changelog
 

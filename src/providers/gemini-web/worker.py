@@ -76,6 +76,10 @@ async def run(payload, client_factory=None):
         client = client_factory(psid, psidts, proxy=payload.get("proxy"))
         try:
             await client.init(timeout=450, auto_close=False, auto_refresh=True, verbose=False)
+            # The library can initialize successfully in guest mode after cookies
+            # expire. Treat that as failed authentication before model discovery.
+            if getattr(getattr(client, "account_status", None), "name", None) == "UNAUTHENTICATED":
+                raise WorkerError(401, "Gemini Web session expired or was rejected; reconnect it")
             model = select_argon(client.list_models())
             if mode == "probe":
                 emit({"type": "ready"})

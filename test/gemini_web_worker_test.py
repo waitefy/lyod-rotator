@@ -87,6 +87,16 @@ class WorkerTest(unittest.TestCase):
         self.assertFalse(client.generated)
         self.assertEqual([e["type"] for e in events], ["ready", "done"])
 
+    def test_guest_session_is_an_auth_error_even_if_argon_is_listed(self):
+        for models in ([model("Gemini Flash-Lite")], [model("argon")]):
+            client = Client(models, ["must not generate"])
+            client.account_status = SimpleNamespace(name="UNAUTHENTICATED")
+            with self.assertRaises(worker.WorkerError) as caught:
+                self.run_client(client)
+            self.assertEqual(caught.exception.status, 401)
+            self.assertFalse(client.generated)
+            self.assertTrue(client.closed)
+
     def test_output_bound_closes_upstream(self):
         client = Client([model("Gemini-4-Argon")], ["abcd", "efgh", "unread"])
         with patch.object(worker, "MAX_OUTPUT_CHARS", 6):
