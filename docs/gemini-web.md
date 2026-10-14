@@ -117,6 +117,18 @@ docker build -f Dockerfile.gemini-web -t tuxevil-rotator:argon .
 - Последующая проверка выявила истёкшую сессию: Google открыл гостевой режим.
   Первый запуск в рабочей конфигурации откатился на прежний контейнер.
   Успешный smoke-тест не гарантирует дальнейший срок действия cookies.
+- Форк `4.2.0-argon.1` установлен на `rotator.lyod.online`. Сохранены все
+  8 прежних аккаунтов и добавлен отдельный `gemini-web-session@local`.
+  Модель `gemini-web/gemini-4-argon-web` выключена до обновления cookies:
+  предварительная проверка возвращает 401. Публичный `/v1/models` отвечает 200.
+  Служба — `tuxevil-rotator-stage.service`, образ — `tuxevil-rotator:4.2.0-argon.1`.
+  Сессия хранится в `/var/lib/tuxevil-rotator-gemini-session/gemini-cookies.json`
+  (в контейнере `/sessions/gemini-cookies.json`).
+- Резервная копия перед успешным переключением:
+  `/root/rotator-backups/20261014T221610Z-argon` (конфигурация после остановки,
+  inspect контейнера и архив состояния до остановки без вложенных старых backups).
+  Прежний контейнер сохранён как
+  `tuxevil-rotator-stage-before-argon-20261014T221610Z`.
 
 ## Проверки без Google
 
