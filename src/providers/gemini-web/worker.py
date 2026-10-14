@@ -79,39 +79,42 @@ async def run(payload, client_factory=None):
             model = select_argon(client.list_models())
             if mode == "probe":
                 emit({"type": "ready"})
-                emit({"type": "done"})
-                return
-            # Validate upstream before sending HTTP 200 to the downstream client.
-            async with contextlib.aclosing(
-                client.generate_content_stream(payload["prompt"], model=model, temporary=True)
-            ) as stream:
-                first = await anext(stream, None)
-                if first is None:
-                    raise WorkerError(502, "Gemini Web returned no response")
-                emit({"type": "ready"})
-                count = 0
-                truncated = False
+                completed = {"type": "done"}
+            else:
+                # Validate upstream before sending HTTP 200 to the downstream client.
+                async with contextlib.aclosing(
+                    client.generate_content_stream(payload["prompt"], model=model, temporary=True)
+                ) as stream:
+                    first = await anext(stream, None)
+                    if first is None:
+                        raise WorkerError(502, "Gemini Web returned no response")
+                    emit({"type": "ready"})
+                    count = 0
+                    truncated = False
 
-                def send(output):
-                    nonlocal count, truncated
-                    delta = output.text_delta or ""
-                    remaining = MAX_OUTPUT_CHARS - count
-                    text = delta[:remaining]
-                    if text:
-                        emit({"type": "delta", "text": text})
-                        count += len(text)
-                    truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
+                    def send(output):
+                        nonlocal count, truncated
+                        delta = output.text_delta or ""
+                        remaining = MAX_OUTPUT_CHARS - count
+                        text = delta[:remaining]
+                        if text:
+                            emit({"type": "delta", "text": text})
+                            count += len(text)
+                        truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
 
-                send(first)
-                if not truncated:
-                    async for output in stream:
-                        send(output)
-                        if truncated:
-                            break
-                emit({"type": "done", "truncated": truncated})
+                    send(first)
+                    if not truncated:
+                        async for output in stream:
+                            send(output)
+                            if truncated:
+                                break
+                    completed = {"type": "done", "truncated": truncated}
         finally:
             with contextlib.suppress(Exception):
                 await client.close()
+    # Flush refreshed cookies and release the session lock before acknowledging
+    # completion, so the next conversation turn can start immediately.
+    emit(completed)
 
 
 def safe_error(error):
