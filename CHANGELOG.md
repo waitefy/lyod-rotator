@@ -6,6 +6,7 @@
 - Isolate browser-session errors from other account credentials. Add mock worker, routing and protocol tests, setup documentation and a separate Dockerfile.
 - Preserve the deployed UTF-8 stream decoder, public-host logging and disabled-model diagnostic fixes.
 - Verify real Argon generation through the worker and OpenAI Chat Completions locally and in a server smoke container. Treat guest sessions after cookie expiry as provider-scoped authentication errors.
+- Wait up to 60 seconds for a busy browser session instead of immediately rejecting overlapping client requests with HTTP 409. Preserve cancellation and exclusive upstream access.
 
 # Changelog
 

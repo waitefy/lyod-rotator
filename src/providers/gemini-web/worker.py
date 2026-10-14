@@ -12,6 +12,7 @@ import sys
 
 MAX_INPUT_BYTES = 256_000
 MAX_OUTPUT_CHARS = 128_000
+SESSION_LOCK_WAIT_SECONDS = 60
 ARGON_NAME = re.compile(r"(?:\bgemini[\s_-]*4[\s_-]*argon\b|^argon$)", re.I)
 
 
@@ -23,6 +24,20 @@ class WorkerError(Exception):
 
 def emit(event):
     print(json.dumps(event, ensure_ascii=False), flush=True)
+
+
+async def acquire_session_lock(lock):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SESSION_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise WorkerError(409, "Gemini Web session remained busy for 60 seconds; retry the request") from None
+            await asyncio.sleep(min(0.1, remaining))
 
 
 def select_argon(models):
@@ -64,10 +79,7 @@ async def run(payload, client_factory=None):
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.environ["GEMINI_COOKIE_PATH"] = str(cache)
     with (cache / "session.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise WorkerError(409, "Gemini Web session is busy; allow one request per account") from None
+        await acquire_session_lock(lock)
         if client_factory is None:
             from gemini_webapi import GeminiClient, set_log_level
 

@@ -111,10 +111,62 @@ class WorkerTest(unittest.TestCase):
         with (cache / "session.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             client = Client([model("argon")], ["should not happen"])
-            with self.assertRaises(worker.WorkerError) as caught:
+            with patch.object(worker, "SESSION_LOCK_WAIT_SECONDS", 0), self.assertRaises(worker.WorkerError) as caught:
                 self.run_client(client)
             self.assertEqual(caught.exception.status, 409)
             self.assertFalse(client.generated)
+
+    def test_overlapping_requests_wait_until_first_client_is_closed(self):
+        async def check():
+            started, release = asyncio.Event(), asyncio.Event()
+            first = Client([model("argon")], ["first"])
+            second = Client([model("argon")], ["second"])
+            original_init = first.init
+
+            async def slow_init(**kwargs):
+                started.set()
+                await release.wait()
+                await original_init(**kwargs)
+
+            first.init = slow_init
+            factory_calls = []
+
+            def second_factory(*args, **kwargs):
+                self.assertTrue(first.closed)
+                factory_calls.append(True)
+                return second
+
+            a = asyncio.create_task(worker.run(self.payload, lambda *args, **kwargs: first))
+            await asyncio.wait_for(started.wait(), 1)
+            b = asyncio.create_task(worker.run(self.payload, second_factory))
+            await asyncio.sleep(0.02)
+            self.assertEqual(factory_calls, [])
+            self.assertFalse(b.done())
+            release.set()
+            await asyncio.wait_for(asyncio.gather(a, b), 2)
+            self.assertTrue(second.generated)
+            self.assertTrue(second.closed)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            asyncio.run(check())
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([e["type"] for e in events], ["ready", "delta", "done"] * 2)
+
+    def test_waiting_for_session_lock_is_cancellable(self):
+        async def check():
+            path = Path(self.temp.name) / "cancel.lock"
+            with path.open("a") as held, path.open("a") as waiting:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                task = asyncio.create_task(worker.acquire_session_lock(waiting))
+                await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                fcntl.flock(held, fcntl.LOCK_UN)
+                await asyncio.wait_for(worker.acquire_session_lock(waiting), 1)
+
+        asyncio.run(check())
 
     def test_auth_errors_are_sanitized(self):
         AuthError = type("AuthError", (Exception,), {})
