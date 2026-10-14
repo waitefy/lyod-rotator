@@ -87,8 +87,8 @@ function ProviderMark({ id, size = "md" }: { id: string; size?: "sm" | "md" | "l
   );
 }
 
-function authLabel(kind: "oauth" | "api-key"): string {
-  return kind === "oauth" ? "Sign-in" : "API key";
+function authLabel(kind: "oauth" | "api-key" | "web-session"): string {
+  return kind === "web-session" ? "Browser session" : kind === "oauth" ? "Sign-in" : "API key";
 }
 
 export function ModelsPage(): JSX.Element {

@@ -199,7 +199,7 @@ export interface SessionInfo {
 export interface CatalogProvider {
   id: string;
   name: string;
-  credentialKind: "oauth" | "api-key";
+  credentialKind: "oauth" | "api-key" | "web-session";
   /** False when the operator turned the provider off. */
   enabled: boolean;
 }

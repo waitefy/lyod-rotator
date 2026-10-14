@@ -31,6 +31,7 @@ export function getProviderCredentialDetails(
   const projectId = getProviderProjectId(norm, provider);
   let providerAccountId = cred?.providerAccountId || "";
   let secret = cred?.refreshToken || cred?.apiKey || "";
+  if (provider === "gemini-web") secret = cred?.cookiesFile || "";
 
   if (provider === "google-antigravity") {
     secret ||= norm.refreshToken || norm.apiKey || "";

@@ -96,7 +96,7 @@ describe("Models page HTTP routes", () => {
     const body = (await response.json()) as ModelCatalogResponse;
     assert.deepEqual(
       body.providers.map((provider) => provider.id),
-      ["opencode-zen", "openai-codex", "ollama", "google-antigravity"],
+      ["opencode-zen", "openai-codex", "ollama", "google-antigravity", "gemini-web"],
     );
     const pickle = body.models.filter((entry) => entry.id === "big-pickle");
     assert.deepEqual(

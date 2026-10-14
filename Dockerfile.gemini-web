@@ -1,0 +1,22 @@
+FROM node:22-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements-gemini-web.txt ./
+RUN python3 -m venv /opt/gemini-web \
+    && /opt/gemini-web/bin/pip install --no-cache-dir -r requirements-gemini-web.txt
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --chown=node:node bin ./bin
+COPY --chown=node:node src ./src
+COPY --chown=node:node README.md CHANGELOG.md LICENSE ./
+RUN mkdir -p /data /sessions && chown -R node:node /app /data /sessions
+USER node
+ENV NODE_ENV=production \
+    TUXEVIL_ROTATOR_DIR=/data \
+    TUXEVIL_ROTATOR_CONTAINER=1 \
+    TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON=/opt/gemini-web/bin/python
+EXPOSE 51200
+VOLUME ["/data", "/sessions"]
+CMD ["node", "--import", "tsx/esm", "src/cli.ts", "start"]

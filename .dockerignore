@@ -5,3 +5,9 @@ npm-debug.log
 docker-data
 coverage
 *.tmp
+
+.venv-gemini-web
+__pycache__
+**/__pycache__
+.gemini-web-cache
+**/.gemini-web-cache

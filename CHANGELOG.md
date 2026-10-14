@@ -1,3 +1,12 @@
+## [4.2.0-argon.1] — local fork
+
+- Add the optional `gemini-web` provider with strict discovery of available Gemini 4 Argon, text history, streaming, cancellation and one request per session.
+- Keep cookies in a private file and refresh cache, outside account JSON and request headers. Pin the unofficial Python web client to a source revision.
+- Reject unsupported tools/media/structured output; publish limited capabilities and unavailable usage in the model catalog.
+- Isolate browser-session errors from other account credentials. Add mock worker, routing and protocol tests, setup documentation and a separate Dockerfile.
+- Preserve the deployed UTF-8 stream decoder, public-host logging and disabled-model diagnostic fixes.
+- Real Argon generation remains unverified until an eligible Gemini App session is supplied. No production deployment in this change.
+
 # Changelog
 
 ## [Unreleased]

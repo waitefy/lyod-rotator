@@ -9,12 +9,13 @@ import {
 } from "../src/providers/credential-helpers.js";
 
 describe("provider pool and credential ordering", () => {
-  it("defines the provider order as antigravity, ollama, opencode, codex", () => {
+  it("appends the web provider after the historical credential order", () => {
     assert.deepEqual(PROVIDER_ORDER, [
       "google-antigravity",
       "ollama",
       "opencode-zen",
       "openai-codex",
+      "gemini-web",
     ]);
   });
 

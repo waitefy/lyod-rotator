@@ -26,6 +26,7 @@ export const DEFAULT_PROVIDER_ORDER: readonly string[] = [
   "openai-codex",
   "ollama",
   "google-antigravity",
+  "gemini-web",
 ];
 
 /** The rotator state the catalog reads. Test stubs may omit any of it. */

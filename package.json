@@ -1,6 +1,6 @@
 {
   "name": "tuxevil-rotator",
-  "version": "4.2.0",
+  "version": "4.2.0-argon.1",
   "description": "Multi-provider, multi-account AI proxy rotator with per-model routing, real-time quota tracking, and infringement detection (Google Antigravity, Ollama Cloud)",
   "license": "MIT",
   "type": "module",
@@ -20,7 +20,8 @@
     "lint": "eslint src test scripts/dashboard-dev.ts",
     "coverage": "c8 --reporter=text --reporter=html --check-coverage --lines=60 --branches=50 --functions=60 --statements=60 npm test",
     "check": "npm run typecheck && npm run typecheck:test && npm test && npm run lint",
-    "dashboard:dev": "tsx scripts/dashboard-dev.ts"
+    "dashboard:dev": "tsx scripts/dashboard-dev.ts",
+    "test:gemini-web": "python3 -m unittest discover -s test -p gemini_web_worker_test.py -v"
   },
   "files": [
     "bin/",
@@ -30,7 +31,10 @@
     "CHANGELOG.md",
     "README.md",
     "LICENSE",
-    "tuxevil-rotator_logo.png"
+    "tuxevil-rotator_logo.png",
+    "requirements-gemini-web.txt",
+    "Dockerfile.gemini-web",
+    "docs/gemini-web.md"
   ],
   "keywords": [
     "ai",
@@ -47,7 +51,7 @@
     "type": "git",
     "url": "git+https://github.com/tuxevil/tuxevil-rotator.git"
   },
-  "author": "Sebastián Real (tuxevil)",
+  "author": "Sebasti\u00e1n Real (tuxevil)",
   "dependencies": {
     "@preact/signals": "^2.11.3",
     "@typesafe-ai/sdk": "^0.6.0",
@@ -65,5 +69,6 @@
     "eslint": "^10.6.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.62.1"
-  }
+  },
+  "private": true
 }

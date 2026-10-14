@@ -95,7 +95,7 @@ describe("Models page switches in the rotator", () => {
     assert.equal(await rotator.setProviderOrder(["google-antigravity"]), true);
     const config = rotator.getConfig();
     assert.deepEqual(config.disabledModels, ["ollama/gemma4:31b"]);
-    assert.deepEqual(config.providerOrder, ["google-antigravity", "opencode-zen", "openai-codex", "ollama"]);
+    assert.deepEqual(config.providerOrder, ["google-antigravity", "opencode-zen", "openai-codex", "ollama", "gemini-web"]);
     assert.equal(
       rotator.getModelCatalog().find((entry: { id: string }) => entry.id === "gemma4:31b").offReason,
       "model",

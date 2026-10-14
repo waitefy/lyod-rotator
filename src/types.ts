@@ -46,6 +46,8 @@ export interface ProviderCredential {
   provider: string;
   /** Ollama Cloud: static API key (never expires). */
   apiKey?: string;
+  /** Absolute path to a private Gemini App cookie JSON; cookie values stay outside config. */
+  cookiesFile?: string;
   /** Google Antigravity: OAuth refresh token. */
   refreshToken?: string;
   /** Google Antigravity: Cloud project id. */

@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+import { GEMINI_WEB_MODEL } from "./providers/gemini-web/credentials.js";
 import {
 	MAX_QUOTA_POLL_INTERVAL_MS,
 	MIN_QUOTA_POLL_INTERVAL_MS,
@@ -58,7 +60,7 @@ export function isKnownNonGoogleModel(model: string): boolean {
 	const trimmed = model.trim();
 	if (!trimmed) return false;
 	const lower = trimmed.toLowerCase();
-	if (isCodexRequestModel(trimmed)) return true;
+	if (isCodexRequestModel(trimmed) || lower === GEMINI_WEB_MODEL) return true;
 	if (isOpenCodeZenModel(trimmed) || isOpenCodeZenModel(lower)) return true;
 	return Object.keys(MODEL_TIER_ACCESS).some((k) => k.toLowerCase() === lower);
 }
@@ -91,6 +93,10 @@ export function validateAccountConfig(value: unknown, path = "account"): Validat
 			if (proxyError) errors.push(`${cpath}.${proxyError}`);
 			if (cred.provider === "ollama" || cred.provider === "opencode-zen") {
 				if (!isNonEmptyString(cred.apiKey)) errors.push(`${cpath}.apiKey must be a non-empty string`);
+			} else if (cred.provider === "gemini-web") {
+				if (!isNonEmptyString(cred.cookiesFile) || !isAbsolute(cred.cookiesFile)) {
+					errors.push(`${cpath}.cookiesFile must be an absolute file path`);
+				}
 			} else if (cred.provider === "openai-codex") {
 				if (!isNonEmptyString(cred.refreshToken)) errors.push(`${cpath}.refreshToken must be a non-empty string`);
 				if (cred.providerAccountId !== undefined && !isNonEmptyString(cred.providerAccountId)) {
@@ -105,6 +111,8 @@ export function validateAccountConfig(value: unknown, path = "account"): Validat
 		const provider = typeof value.provider === "string" ? value.provider : "google-antigravity";
 		if (provider === "ollama" || provider === "opencode-zen") {
 			if (!isNonEmptyString(value.apiKey)) errors.push(`${path}.apiKey must be a non-empty string`);
+		} else if (provider === "gemini-web") {
+			errors.push(`${path}: Gemini Web requires credentials with an absolute cookiesFile path`);
 		} else if (provider === "openai-codex") {
 			if (!isNonEmptyString(value.codexRefreshToken ?? value.refreshToken)) {
 				errors.push(`${path}.codexRefreshToken or refreshToken must be a non-empty string`);

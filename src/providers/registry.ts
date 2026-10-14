@@ -6,6 +6,7 @@
 //   3. Extend AccountConfig in src/types.ts with your credential fields
 //   4. Wire your login flow through `rotator login --provider <id>`
 
+import { geminiWebAdapter } from "./gemini-web/index.js";
 import type { ProviderAdapter } from "./adapter.js";
 import { googleAntigravityAdapter } from "./google-antigravity/index.js";
 import { ollamaAdapter } from "./ollama/index.js";
@@ -41,6 +42,7 @@ const PROVIDERS: Record<string, ProviderAdapter> = {
   ollama: ollamaAdapter,
   "openai-codex": openaiCodexAdapter,
   "opencode-zen": opencodeZenAdapter,
+  "gemini-web": geminiWebAdapter,
 };
 
 export function getProviderAdapter(providerId: string): ProviderAdapter {
@@ -77,7 +79,7 @@ export function findProviderForModel(
     }
   }
   // Check non-default explicit providers first to prevent Google fallback overlap
-  for (const adapter of [opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, googleAntigravityAdapter]) {
+  for (const adapter of [opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, geminiWebAdapter, googleAntigravityAdapter]) {
     if (adapter.ownsModel?.(model, context)) {
       return adapter;
     }

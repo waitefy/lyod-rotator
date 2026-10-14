@@ -1,3 +1,5 @@
+> **Argon fork (experimental):** Gemini App provider `gemini-web`, model `gemini-4-argon-web`. See [setup and limitations](docs/gemini-web.md). Based on upstream v4.2.0; not an official upstream release.
+
 <div align="center">
 
 [![npm version](https://img.shields.io/npm/v/tuxevil-rotator?logo=npm&label=version)](https://www.npmjs.com/package/tuxevil-rotator)
