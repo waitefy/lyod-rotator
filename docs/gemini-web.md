@@ -119,8 +119,10 @@ docker build -f Dockerfile.gemini-web -t tuxevil-rotator:argon .
   Успешный smoke-тест не гарантирует дальнейший срок действия cookies.
 - Форк `4.2.0-argon.1` установлен на `rotator.lyod.online`. Сохранены все
   8 прежних аккаунтов и добавлен отдельный `gemini-web-session@local`.
-  Модель `gemini-web/gemini-4-argon-web` выключена до обновления cookies:
-  предварительная проверка возвращает 401. Публичный `/v1/models` отвечает 200.
+  После обновления cookies модель `gemini-web/gemini-4-argon-web` включена.
+  Реальный запрос через публичный `/v1/chat/completions` вернул HTTP 200,
+  `limited-web`, `usage: null` и ответ «Публичный API Argon работает.».
+  Модель опубликована в публичном `/v1/models`.
   Служба — `tuxevil-rotator-stage.service`, образ — `tuxevil-rotator:4.2.0-argon.1`.
   Сессия хранится в `/var/lib/tuxevil-rotator-gemini-session/gemini-cookies.json`
   (в контейнере `/sessions/gemini-cookies.json`).
