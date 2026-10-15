@@ -38,6 +38,12 @@ const writeTool = { type: "function" as const, function: { name: "write", parame
   type: "object", properties: { i: { type: "string" }, path: { type: "string" }, content: { type: "string" } }, required: ["path", "i"],
 } } };
 const fileTools = [...searchTools, editTool, writeTool];
+const bashTool = { type: "function" as const, function: { name: "bash", parameters: {
+  type: "object", properties: { command: { type: "string" }, i: { type: "string" }, cwd: { type: "string" },
+    timeout: { type: "number" }, pty: { type: "boolean" }, async: { type: "boolean" }, name: { type: "string" }, ready: { type: "object" } },
+  required: ["command", "i"],
+} } };
+const allTools = [...fileTools, bashTool];
 const GEMINI_WEB_MODEL = GEMINI_WEB_MODELS[0];
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
@@ -127,12 +133,12 @@ describe("Gemini Web integration", () => {
       ["glob", { i: "List" }], ["grep", { i: "Search", pattern: "ARGON", skip: null }]] as const) {
       assert.deepEqual(bridge.parse(marker + JSON.stringify({ name, arguments: args })), { functionCall: { name, args } });
     }
-    for (const [name, args] of [["bash", {}], ["grep", { i: "Search" }], ["grep", { i: "Search", pattern: "x", skip: -1 }],
+    for (const [name, args] of [["eval", {}], ["grep", { i: "Search" }], ["grep", { i: "Search", pattern: "x", skip: -1 }],
       ["glob", { i: "Find", hidden: "true" }], ["glob", { i: "Find", command: "pwd" }]]) {
       assert.throws(() => bridge.parse(marker + JSON.stringify({ name, arguments: args })));
     }
     assert.ok(webCapabilityError({ ...original, tools: [...searchTools, readTool] }));
-    assert.ok(webCapabilityError({ ...original, messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "bash" } }] }] }));
+    assert.ok(webCapabilityError({ ...original, messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "eval" } }] }] }));
     for (const name of ["glob", "grep"]) {
       const history = openAIToAntigravityBody({ ...original, messages: [...original.messages,
         { role: "assistant", content: null, tool_calls: [{ id: "call_search", type: "function", function: { name, arguments: '{"i":"Search"}' } }] },
@@ -159,10 +165,30 @@ describe("Gemini Web integration", () => {
     }
     for (const [name, args] of [["edit", { i: "Edit" }], ["edit", { i: "Edit", input: " " }],
       ["edit", { i: "Edit", input: patch, command: "pwd" }], ["write", { i: "Write", path: " " }],
-      ["write", { i: "Write", path: "a", content: 1 }], ["bash", { command: "pwd" }]]) {
+      ["write", { i: "Write", path: "a", content: 1 }], ["eval", { command: "pwd" }]]) {
       assert.throws(() => bridge.parse(marker + JSON.stringify({ name, arguments: args })));
     }
-    assert.ok(webCapabilityError({ ...original, tools: [...fileTools, { ...writeTool, function: { ...writeTool.function, name: "bash" } }] }));
+    assert.ok(webCapabilityError({ ...original, tools: [...fileTools, { ...writeTool, function: { ...writeTool.function, name: "eval" } }] }));
+  });
+
+  it("bridges foreground bash and preserves failing command output and exit status", () => {
+    const command = "python3 test_calculator.py";
+    const original = { model: GEMINI_WEB_MODEL, tools: allTools, messages: [{ role: "user" as const, content: "run tests" }] };
+    assert.equal(webCapabilityError(original), undefined);
+    const translated = openAIToAntigravityBody(original);
+    const bridge = createToolBridge(toolDeclarations(translated.request as Record<string, unknown>));
+    const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+    const args = { command, i: "Run tests", cwd: "/tmp/project", timeout: 30, pty: false, async: false };
+    assert.deepEqual(bridge.parse(marker + JSON.stringify({ name: "bash", arguments: args })), { functionCall: { name: "bash", args } });
+    for (const invalid of [{ ...args, command: " " }, { ...args, command: 1 }, { ...args, timeout: -1 },
+      { ...args, cwd: 1 }, { ...args, async: true }, { ...args, pty: true }, { ...args, ready: {} },
+      { ...args, name: "server" }, { ...args, unknown: "x" }, { command }]) {
+      assert.throws(() => bridge.parse(marker + JSON.stringify({ name: "bash", arguments: invalid })));
+    }
+    const history = openAIToAntigravityBody({ ...original, messages: [...original.messages,
+      { role: "assistant", content: null, tool_calls: [{ id: "call_bash", type: "function", function: { name: "bash", arguments: JSON.stringify(args) } }] },
+      { role: "tool", tool_call_id: "call_bash", content: "x".repeat(700) + "AssertionError: add(2, 3) != 5; exit code 1" }] });
+    assert.match(buildWebPrompt(history), /AssertionError: add\(2, 3\) != 5; exit code 1/);
   });
 
   it("accepts read, preserves its history and validates framed arguments", () => {
@@ -175,7 +201,7 @@ describe("Gemini Web integration", () => {
     const prompt = buildWebPrompt(openAIToAntigravityBody(original));
     assert.match(prompt, /Client tool call/);
     assert.match(prompt, /random fixture result/);
-    assert.ok(webCapabilityError({ ...original, tools: [{ type: "function", function: { ...readTool.function, name: "bash" } }] }));
+    assert.ok(webCapabilityError({ ...original, tools: [{ type: "function", function: { ...readTool.function, name: "eval" } }] }));
     assert.ok(webCapabilityError({ ...original, tool_choice: "required" }));
     const bridge = createToolBridge([readTool.function]);
     const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
@@ -185,7 +211,7 @@ describe("Gemini Web integration", () => {
     for (const args of [{ path: "a.txt" }, { path: 2, i: "Read" }, { path: "a", i: "Read", command: "rm" }, { path: "a", i: "Read", offset: -1 }]) {
       assert.throws(() => bridge.parse(marker + JSON.stringify({ name: "read", arguments: args })));
     }
-    assert.throws(() => bridge.parse(marker + '{"name":"bash","arguments":{}}'));
+    assert.throws(() => bridge.parse(marker + '{"name":"eval","arguments":{}}'));
     assert.throws(() => bridge.parse(marker + '{broken'));
     assert.deepEqual(bridge.parse("<tool_call>plain text</tool_call>"), { text: "<tool_call>plain text</tool_call>" });
   });
@@ -364,16 +390,16 @@ else:
       await fakePython(`import json, sys, re
 prompt = json.load(sys.stdin)['prompt']
 marker = re.search(r'ROTATOR_TOOL_[a-f0-9-]+', prompt).group(0)
-name = next((name for name in ['edit','write','grep','glob'] if 'REQUEST_' + name.upper() in prompt), 'read')
-args = {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'input':'[fixture.txt#A1B2]\\nPUT 1.=1:\\n+updated','i':'Edit fixture'} if name == 'edit' else {'path':'fixture.txt','content':'created','i':'Write fixture'} if name == 'write' else {'path':'fixture.txt','i':'Read fixture'}
+name = next((name for name in ['bash','edit','write','grep','glob'] if 'REQUEST_' + name.upper() in prompt), 'read')
+args = {'command':'python3 test_calculator.py','i':'Run tests','timeout':30} if name == 'bash' else {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'input':'[fixture.txt#A1B2]\\nPUT 1.=1:\\n+updated','i':'Edit fixture'} if name == 'edit' else {'path':'fixture.txt','content':'created','i':'Write fixture'} if name == 'write' else {'path':'fixture.txt','i':'Read fixture'}
 text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':name,'arguments':args})
 for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
     print(json.dumps(event), flush=True)`, async () => {
-        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"], ["edit", "REQUEST_EDIT"], ["write", "REQUEST_WRITE"]]) {
+        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"], ["edit", "REQUEST_EDIT"], ["write", "REQUEST_WRITE"], ["bash", "REQUEST_BASH"]]) {
         for (const stream of [false, true]) {
           const messages: unknown[] = [{ role: "user", content }];
           const send = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: fileTools, messages, stream }) });
+            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: allTools, messages, stream }) });
           const response = await send();
           assert.equal(response.status, 200);
           if (stream) {
@@ -385,7 +411,7 @@ for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
             const result = await response.json();
             const call = result.choices[0].message.tool_calls[0];
             assert.equal(call.function.name, name);
-            assert.deepEqual(JSON.parse(call.function.arguments), name === "grep" ? { pattern: "fixture", i: "Search fixture" } : name === "edit" ? { input: "[fixture.txt#A1B2]\nPUT 1.=1:\n+updated", i: "Edit fixture" } : name === "write" ? { path: "fixture.txt", content: "created", i: "Write fixture" } : { path: "fixture.txt", i: "Read fixture" });
+            assert.deepEqual(JSON.parse(call.function.arguments), name === "bash" ? { command: "python3 test_calculator.py", i: "Run tests", timeout: 30 } : name === "grep" ? { pattern: "fixture", i: "Search fixture" } : name === "edit" ? { input: "[fixture.txt#A1B2]\nPUT 1.=1:\n+updated", i: "Edit fixture" } : name === "write" ? { path: "fixture.txt", content: "created", i: "Write fixture" } : { path: "fixture.txt", i: "Read fixture" });
             messages.push(result.choices[0].message, { role: "tool", tool_call_id: call.id, content: "FILE_ROUND_TRIP_OK" });
             const final = await send();
             assert.equal(final.status, 200);

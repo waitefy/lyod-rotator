@@ -19,7 +19,7 @@ test("Argon uses supported tools and restores the previous tool set and thinking
   assert.deepEqual(active, original);
   for (const suffix of ["low", "medium", "high"]) {
     await handlers.get("before_agent_start")({}, context(`gemini-4-argon-web-${suffix}`));
-    assert.deepEqual(active, ["read", "edit", "write", "glob", "grep"]);
+    assert.deepEqual(active, ["read", "bash", "edit", "write", "glob", "grep"]);
     assert.equal(thinking, "off");
     await handlers.get("turn_start")({}, context(`gemini-4-argon-web-${suffix}`));
   }

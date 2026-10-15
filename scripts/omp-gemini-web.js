@@ -1,6 +1,6 @@
 /** OMP extension: keep unsupported tools out of Gemini Web requests. */
 export default function geminiWebTools(api) {
-  const supported = new Set(["read", "glob", "grep", "edit", "write"]);
+  const supported = new Set(["read", "glob", "grep", "edit", "write", "bash"]);
   let savedTools;
   let savedThinking;
 

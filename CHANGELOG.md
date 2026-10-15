@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Bridge foreground OMP `bash` commands alongside the five file tools. Preserve command output and failure status; execute under the client permissions. Reject background, interactive and named service requests.
+
 - Add a local OMP extension that selects the supported file tools for Argon during normal launches and restores the former tool set and thinking level when leaving Argon. Respect explicitly restricted tool sets.
 
 - Bridge OMP `edit` and `write` using their original schemas and patch text. Preserve client-side snapshot validation, tool errors and post-edit reads; leave execution and approval with the client.
