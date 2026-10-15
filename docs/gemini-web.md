@@ -203,6 +203,22 @@ omp --model tuxevil-rotator/gemini-4-argon-web-medium --tools read,glob,grep,edi
   --no-lsp --no-extensions --no-skills --no-title --no-session --thinking off
 ```
 
+На этом компьютере можно запускать обычный `omp`: установлено расширение
+`~/.omp/agent/extensions/rotator-gemini-web.js` (ссылка на
+`scripts/omp-gemini-web.js` в форке). Для моделей
+`tuxevil-rotator/gemini-4-argon-web-{low,medium,high}` перед запросом оно
+оставляет активными только пять поддерживаемых файловых инструментов и
+выключает дополнительный клиентский effort. При переходе на другую модель
+возвращает прежний набор и effort. Явные ограничения `--tools` / `--no-tools`
+сохраняются: расширение не добавляет отключённые инструменты.
+Проверка расширения: `node --test scripts/omp-gemini-web.test.mjs`.
+Проверен обычный запуск OMP с глобальными настройками, без `--tools`,
+`--no-lsp`, `--no-extensions`, `--no-skills` и `--thinking`: реальный Argon Low
+вызвал `read` и вернул случайную метку из локального файла без ошибок.
+
+Настройки OpenCode этим расширением не меняются: его файловые инструменты
+используют другие имена аргументов и формат правок.
+
 Локальный `omp-argon` запускает Low с `--tools read,glob,grep,edit,write`.
 Для Medium или High добавьте `--model tuxevil-rotator/gemini-4-argon-web-medium`
 или `--model tuxevil-rotator/gemini-4-argon-web-high`.

@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Add a local OMP extension that selects the supported file tools for Argon during normal launches and restores the former tool set and thinking level when leaving Argon. Respect explicitly restricted tool sets.
+
 - Bridge OMP `edit` and `write` using their original schemas and patch text. Preserve client-side snapshot validation, tool errors and post-edit reads; leave execution and approval with the client.
 
 - Extend the experimental client tool bridge to OMP `glob` and `grep` alongside `read`, with per-tool schema validation, nullable arguments and sequential search/read history. Keep execution on the API client.
