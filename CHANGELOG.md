@@ -7,6 +7,7 @@
 - Preserve the deployed UTF-8 stream decoder, public-host logging and disabled-model diagnostic fixes.
 - Verify real Argon generation through the worker and OpenAI Chat Completions locally and in a server smoke container. Treat guest sessions after cookie expiry as provider-scoped authentication errors.
 - Wait up to 60 seconds for a busy browser session instead of immediately rejecting overlapping client requests with HTTP 409. Preserve cancellation and exclusive upstream access.
+- Prototype an experimental OpenAI Chat Completions `read` tool bridge with per-request framing, argument validation, client-side execution and full text results. Keep other tools unsupported. Production installation awaits renewed browser credentials and a real Argon round-trip test.
 
 # Changelog
 

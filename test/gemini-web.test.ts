@@ -14,6 +14,11 @@ import { buildWebPrompt, runWebWorker, webCapabilityError } from "../src/provide
 import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
 import type { AccountRuntime } from "../src/types.js";
+import { createReadBridge } from "../src/providers/gemini-web/read-tool.js";
+
+const readTool = { type: "function" as const, function: { name: "read", parameters: {
+  type: "object", properties: { path: { type: "string" }, i: { type: "string" }, offset: { type: "integer" } }, required: ["path", "i"],
+} } };
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
 after(() => rm(temp, { recursive: true, force: true }));
@@ -61,7 +66,7 @@ describe("Gemini Web integration", () => {
     const prompt = buildWebPrompt(body);
     for (const text of ["Keep it short.", "Привет", "Здравствуйте", "🌍"]) assert.ok(prompt.includes(text));
     assert.throws(() => buildWebPrompt({ ...body, request: { contents: [{ role: "user", parts: [{ inlineData: { data: "abc" } }] }] } }), /text only/);
-    assert.throws(() => buildWebPrompt({ ...body, request: { tools: [{}] } }), /API tools/);
+    assert.throws(() => buildWebPrompt({ ...body, request: { tools: [{}] } }), /API tool/);
     assert.throws(() => buildWebPrompt(openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, messages: [{ role: "user", content: "🌍".repeat(12001) }] })), /UTF-8/);
     assert.ok(webCapabilityError({ response_format: { type: "json_schema" } }));
     assert.ok(webCapabilityError({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.test/img" } }] }] }));
@@ -73,6 +78,31 @@ describe("Gemini Web integration", () => {
       const action = await classifyUpstreamResponse(new Response("safe error", { status }), "web", {} as AccountRuntime, GEMINI_WEB_MODEL, "gemini-web", "gemini-web");
       assert.equal(action.kind, "web-error");
     }
+  });
+
+  it("accepts only read, preserves its history and validates framed arguments", () => {
+    const original: Parameters<typeof openAIToAntigravityBody>[0] = { model: GEMINI_WEB_MODEL, tools: [readTool], messages: [
+      { role: "user", content: "read a file" },
+      { role: "assistant", content: null, tool_calls: [{ id: "call_read", type: "function", function: { name: "read", arguments: '{"path":"a.txt","i":"Read"}' } }] },
+      { role: "tool", tool_call_id: "call_read", content: "x".repeat(700) + "random fixture result" },
+    ] };
+    assert.equal(webCapabilityError(original), undefined);
+    const prompt = buildWebPrompt(openAIToAntigravityBody(original));
+    assert.match(prompt, /Client tool call/);
+    assert.match(prompt, /random fixture result/);
+    assert.ok(webCapabilityError({ ...original, tools: [{ type: "function", function: { ...readTool.function, name: "bash" } }] }));
+    assert.ok(webCapabilityError({ ...original, tool_choice: "required" }));
+    const bridge = createReadBridge(readTool.function);
+    const marker = bridge.instruction.match(/ROTATOR_READ_[a-f0-9-]+/)![0];
+    assert.deepEqual(bridge.parse(`${marker}{"name":"read","arguments":{"path":"a.txt","i":"Read"}}`), {
+      functionCall: { name: "read", args: { path: "a.txt", i: "Read" } },
+    });
+    for (const args of [{ path: "a.txt" }, { path: 2, i: "Read" }, { path: "a", i: "Read", command: "rm" }, { path: "a", i: "Read", offset: -1 }]) {
+      assert.throws(() => bridge.parse(marker + JSON.stringify({ name: "read", arguments: args })));
+    }
+    assert.throws(() => bridge.parse(marker + '{"name":"bash","arguments":{}}'));
+    assert.throws(() => bridge.parse(marker + '{broken'));
+    assert.deepEqual(bridge.parse("<tool_call>plain text</tool_call>"), { text: "<tool_call>plain text</tool_call>" });
   });
 });
 
@@ -203,6 +233,35 @@ else:
         assert.equal(rejected.status, 401);
         await rejected.text();
         assert.deepEqual(invalid, ["gemini-web"]);
+      });
+      await fakePython(`import json, sys, re
+prompt = json.load(sys.stdin)['prompt']
+marker = re.search(r'ROTATOR_READ_[a-f0-9-]+', prompt).group(0)
+text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':'read','arguments':{'path':'fixture.txt','i':'Read fixture'}})
+for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
+    print(json.dumps(event), flush=True)`, async () => {
+        for (const stream of [false, true]) {
+          const messages: unknown[] = [{ role: "user", content: "Read fixture.txt" }];
+          const send = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: [readTool], messages, stream }) });
+          const response = await send();
+          assert.equal(response.status, 200);
+          if (stream) {
+            const text = await response.text();
+            assert.match(text, /"tool_calls"/);
+            assert.match(text, /"finish_reason":"tool_calls"/);
+            assert.doesNotMatch(text, /ROTATOR_READ_/);
+          } else {
+            const result = await response.json();
+            const call = result.choices[0].message.tool_calls[0];
+            assert.equal(call.function.name, "read");
+            assert.deepEqual(JSON.parse(call.function.arguments), { path: "fixture.txt", i: "Read fixture" });
+            messages.push(result.choices[0].message, { role: "tool", tool_call_id: call.id, content: "FILE_ROUND_TRIP_OK" });
+            const final = await send();
+            assert.equal(final.status, 200);
+            assert.equal((await final.json()).choices[0].message.content, "FILE_ROUND_TRIP_OK");
+          }
+        }
       });
     } finally {
       server.closeAllConnections();
