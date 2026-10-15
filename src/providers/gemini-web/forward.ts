@@ -19,7 +19,7 @@ export class WebRequestError extends Error {}
 /** Check original API payloads before generic translators can discard unsupported fields. */
 export function webCapabilityError(value: unknown): string | undefined {
   const tools = isRecord(value) && Array.isArray(value.tools) ? value.tools : [];
-  const supportedTools = tools.length > 0 && tools.length <= 3 && tools.every((tool) =>
+  const supportedTools = tools.length > 0 && tools.every((tool) =>
     isRecord(tool) && tool.type === "function" && isToolDeclaration(tool.function)) &&
     new Set(tools.map((tool) => tool.function.name)).size === tools.length;
   const names = new Set(supportedTools ? tools.map((tool) => tool.function.name) : []);
@@ -36,7 +36,7 @@ export function webCapabilityError(value: unknown): string | undefined {
         (typeof item.type === "string" && !["text", "input_text", "output_text", "message"].includes(item.type)) ||
         item.image_url || item.inlineData || item.fileData || item.input_audio || item.audio ||
         (Array.isArray(item.modalities) && item.modalities.some((mode) => mode !== "text"))) {
-      return "Gemini Web supports text chat and experimental read, glob and grep tools only; other tools, files, audio and structured output are unavailable";
+      return "Gemini Web supports text chat and experimental read, glob, grep, edit and write tools only; other tools, files, audio and structured output are unavailable";
     }
     for (const [key, entry] of Object.entries(item)) {
       if (supportedTools && ["tools", "tool_calls"].includes(key)) continue;
@@ -53,7 +53,7 @@ export function buildWebPrompt(body: RequestBody): string {
   const request = body.request;
   let declarations: Record<string, unknown>[];
   try { declarations = toolDeclarations(request); }
-  catch { throw new WebRequestError("Gemini Web supports only experimental read, glob and grep API tools"); }
+  catch { throw new WebRequestError("Gemini Web supports only experimental read, glob, grep, edit and write API tools"); }
   if (request.cachedContent || (request.toolConfig && (!declarations.length || !isRecord(request.toolConfig) ||
       !isRecord(request.toolConfig.functionCallingConfig) ||
       !["AUTO", "NONE"].includes(String(request.toolConfig.functionCallingConfig.mode))))) {

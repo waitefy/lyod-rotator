@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Bridge OMP `edit` and `write` using their original schemas and patch text. Preserve client-side snapshot validation, tool errors and post-edit reads; leave execution and approval with the client.
+
 - Extend the experimental client tool bridge to OMP `glob` and `grep` alongside `read`, with per-tool schema validation, nullable arguments and sequential search/read history. Keep execution on the API client.
 
 - Publish three Gemini Web Argon models: `gemini-4-argon-web-low`, `-medium`, and `-high`, with fixed web thinking levels (1, 4, 2). Keep the former id as an unlisted Low alias. Check both wire selectors, cancellation cleanup, model routing and fixed-level behavior; verify real Google generation at all three levels.

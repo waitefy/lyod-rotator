@@ -31,6 +31,13 @@ const grepTool = { type: "function" as const, function: { name: "grep", paramete
   type: "object", properties: { i: { type: "string" }, pattern: { type: "string" }, path: { type: "string" }, skip: { type: ["number", "null"] } }, required: ["pattern", "i"],
 } } };
 const searchTools = [readTool, globTool, grepTool];
+const editTool = { type: "function" as const, function: { name: "edit", parameters: {
+  type: "object", properties: { i: { type: "string" }, input: { type: "string" } }, required: ["input", "i"],
+} } };
+const writeTool = { type: "function" as const, function: { name: "write", parameters: {
+  type: "object", properties: { i: { type: "string" }, path: { type: "string" }, content: { type: "string" } }, required: ["path", "i"],
+} } };
+const fileTools = [...searchTools, editTool, writeTool];
 const GEMINI_WEB_MODEL = GEMINI_WEB_MODELS[0];
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
@@ -132,6 +139,30 @@ describe("Gemini Web integration", () => {
         { role: "tool", tool_call_id: "call_search", content: "SEARCH_RESULT_OK" }] });
       assert.match(buildWebPrompt(history), /SEARCH_RESULT_OK/);
     }
+  });
+
+  it("bridges OMP edit/write schemas and preserves patch text, errors and history", () => {
+    const patch = "[fixture.py#A1B2]\nPUT 1.=1:\n+value = 2\n";
+    const original = { model: GEMINI_WEB_MODEL, tools: fileTools, messages: [{ role: "user" as const, content: "edit" }] };
+    assert.equal(webCapabilityError(original), undefined);
+    const translated = openAIToAntigravityBody(original);
+    const bridge = createToolBridge(toolDeclarations(translated.request as Record<string, unknown>));
+    const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+    for (const [name, args] of [["edit", { input: patch, i: "Update value" }],
+      ["write", { path: "fixture.py", content: "value = 1\n", i: "Create fixture" }],
+      ["write", { path: "empty.txt", content: "", i: "Create empty file" }]] as const) {
+      assert.deepEqual(bridge.parse(marker + JSON.stringify({ name, arguments: args })), { functionCall: { name, args } });
+      const history = openAIToAntigravityBody({ ...original, messages: [...original.messages,
+        { role: "assistant", content: null, tool_calls: [{ id: "call_edit", type: "function", function: { name, arguments: JSON.stringify(args) } }] },
+        { role: "tool", tool_call_id: "call_edit", content: "EDIT_ERROR: stale tag; reread file" }] });
+      assert.match(buildWebPrompt(history), /EDIT_ERROR: stale tag; reread file/);
+    }
+    for (const [name, args] of [["edit", { i: "Edit" }], ["edit", { i: "Edit", input: " " }],
+      ["edit", { i: "Edit", input: patch, command: "pwd" }], ["write", { i: "Write", path: " " }],
+      ["write", { i: "Write", path: "a", content: 1 }], ["bash", { command: "pwd" }]]) {
+      assert.throws(() => bridge.parse(marker + JSON.stringify({ name, arguments: args })));
+    }
+    assert.ok(webCapabilityError({ ...original, tools: [...fileTools, { ...writeTool, function: { ...writeTool.function, name: "bash" } }] }));
   });
 
   it("accepts read, preserves its history and validates framed arguments", () => {
@@ -333,16 +364,16 @@ else:
       await fakePython(`import json, sys, re
 prompt = json.load(sys.stdin)['prompt']
 marker = re.search(r'ROTATOR_TOOL_[a-f0-9-]+', prompt).group(0)
-name = 'grep' if 'REQUEST_GREP' in prompt else 'glob' if 'REQUEST_GLOB' in prompt else 'read'
-args = {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'path':'fixture.txt','i':'Read fixture'}
+name = next((name for name in ['edit','write','grep','glob'] if 'REQUEST_' + name.upper() in prompt), 'read')
+args = {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'input':'[fixture.txt#A1B2]\\nPUT 1.=1:\\n+updated','i':'Edit fixture'} if name == 'edit' else {'path':'fixture.txt','content':'created','i':'Write fixture'} if name == 'write' else {'path':'fixture.txt','i':'Read fixture'}
 text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':name,'arguments':args})
 for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
     print(json.dumps(event), flush=True)`, async () => {
-        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"]]) {
+        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"], ["edit", "REQUEST_EDIT"], ["write", "REQUEST_WRITE"]]) {
         for (const stream of [false, true]) {
           const messages: unknown[] = [{ role: "user", content }];
           const send = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: searchTools, messages, stream }) });
+            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: fileTools, messages, stream }) });
           const response = await send();
           assert.equal(response.status, 200);
           if (stream) {
@@ -354,7 +385,7 @@ for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
             const result = await response.json();
             const call = result.choices[0].message.tool_calls[0];
             assert.equal(call.function.name, name);
-            assert.deepEqual(JSON.parse(call.function.arguments), name === "grep" ? { pattern: "fixture", i: "Search fixture" } : { path: "fixture.txt", i: "Read fixture" });
+            assert.deepEqual(JSON.parse(call.function.arguments), name === "grep" ? { pattern: "fixture", i: "Search fixture" } : name === "edit" ? { input: "[fixture.txt#A1B2]\nPUT 1.=1:\n+updated", i: "Edit fixture" } : name === "write" ? { path: "fixture.txt", content: "created", i: "Write fixture" } : { path: "fixture.txt", i: "Read fixture" });
             messages.push(result.choices[0].message, { role: "tool", tool_call_id: call.id, content: "FILE_ROUND_TRIP_OK" });
             const final = await send();
             assert.equal(final.status, 200);
