@@ -7,7 +7,7 @@ import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
 import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, getCookiesFile } from "./credentials.js";
-import { createReadBridge, isReadDeclaration, readDeclaration, type ReadBridge } from "./read-tool.js";
+import { createToolBridge, isToolDeclaration, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
 
 const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
 const ENDPOINT = "https://gemini.google.com/app";
@@ -18,25 +18,28 @@ export class WebRequestError extends Error {}
 
 /** Check original API payloads before generic translators can discard unsupported fields. */
 export function webCapabilityError(value: unknown): string | undefined {
-  const readTools = isRecord(value) && Array.isArray(value.tools) && value.tools.length === 1 &&
-    isRecord(value.tools[0]) && value.tools[0].type === "function" && isReadDeclaration(value.tools[0].function);
+  const tools = isRecord(value) && Array.isArray(value.tools) ? value.tools : [];
+  const supportedTools = tools.length > 0 && tools.length <= 3 && tools.every((tool) =>
+    isRecord(tool) && tool.type === "function" && isToolDeclaration(tool.function)) &&
+    new Set(tools.map((tool) => tool.function.name)).size === tools.length;
+  const names = new Set(supportedTools ? tools.map((tool) => tool.function.name) : []);
   const pending: unknown[] = [value];
   while (pending.length) {
     const item = pending.pop();
     if (Array.isArray(item)) { for (const entry of item) pending.push(entry); continue; }
     if (!isRecord(item)) continue;
-    if ((Array.isArray(item.tools) && item.tools.length && !readTools) ||
-        (item.tool_calls && (!readTools || !Array.isArray(item.tool_calls) || item.tool_calls.some((call) =>
-          !isRecord(call) || call.type !== "function" || !isRecord(call.function) || call.function.name !== "read"))) ||
-        ((item.tool_call_id || item.role === "tool") && !readTools) || item.function_call || item.functions ||
-        (item.tool_choice !== undefined && item.tool_choice !== "none" && !(readTools && item.tool_choice === "auto")) ||
+    if ((Array.isArray(item.tools) && item.tools.length && !supportedTools) ||
+        (item.tool_calls && (!supportedTools || !Array.isArray(item.tool_calls) || item.tool_calls.some((call) =>
+          !isRecord(call) || call.type !== "function" || !isRecord(call.function) || !names.has(call.function.name)))) ||
+        ((item.tool_call_id || item.role === "tool") && !supportedTools) || item.function_call || item.functions ||
+        (item.tool_choice !== undefined && item.tool_choice !== "none" && !(supportedTools && item.tool_choice === "auto")) ||
         (typeof item.type === "string" && !["text", "input_text", "output_text", "message"].includes(item.type)) ||
         item.image_url || item.inlineData || item.fileData || item.input_audio || item.audio ||
         (Array.isArray(item.modalities) && item.modalities.some((mode) => mode !== "text"))) {
-      return "Gemini Web supports text chat and the experimental read tool only; other tools, files, audio and structured output are unavailable";
+      return "Gemini Web supports text chat and experimental read, glob and grep tools only; other tools, files, audio and structured output are unavailable";
     }
     for (const [key, entry] of Object.entries(item)) {
-      if (readTools && ["tools", "tool_calls"].includes(key)) continue;
+      if (supportedTools && ["tools", "tool_calls"].includes(key)) continue;
       if (entry !== null && typeof entry === "object") pending.push(entry);
     }
   }
@@ -48,15 +51,16 @@ export function buildWebPrompt(body: RequestBody): string {
   if (getWebThinkingLevel(body.model) === undefined) throw new WebRequestError("Unknown Gemini Web model");
   if (!isRecord(body.request)) throw new WebRequestError("Expected a text conversation");
   const request = body.request;
-  let declaration: Record<string, unknown> | undefined;
-  try { declaration = readDeclaration(request); }
-  catch { throw new WebRequestError("Gemini Web supports only the experimental read API tool"); }
-  if (request.cachedContent || (request.toolConfig && (!declaration || !isRecord(request.toolConfig) ||
+  let declarations: Record<string, unknown>[];
+  try { declarations = toolDeclarations(request); }
+  catch { throw new WebRequestError("Gemini Web supports only experimental read, glob and grep API tools"); }
+  if (request.cachedContent || (request.toolConfig && (!declarations.length || !isRecord(request.toolConfig) ||
       !isRecord(request.toolConfig.functionCallingConfig) ||
       !["AUTO", "NONE"].includes(String(request.toolConfig.functionCallingConfig.mode))))) {
     throw new WebRequestError("Unsupported Gemini Web tool configuration or cached content");
   }
   const generation = isRecord(request.generationConfig) ? request.generationConfig : {};
+  const names = new Set(declarations.map((tool) => tool.name));
   if (generation.responseSchema || generation.responseJsonSchema ||
       (generation.responseMimeType && generation.responseMimeType !== "text/plain") ||
       (typeof generation.candidateCount === "number" && generation.candidateCount !== 1)) {
@@ -65,11 +69,11 @@ export function buildWebPrompt(body: RequestBody): string {
   const partsText = (value: unknown): string => {
     if (!Array.isArray(value) || !value.length) throw new WebRequestError("Expected text parts");
     return value.map((part: unknown) => {
-      if (declaration && isRecord(part) && Object.keys(part).length === 1) {
-        if (isRecord(part.functionCall) && part.functionCall.name === "read") {
+      if (declarations.length && isRecord(part) && Object.keys(part).length === 1) {
+        if (isRecord(part.functionCall) && names.has(part.functionCall.name)) {
           return `Client tool call (data): ${JSON.stringify(part.functionCall)}`;
         }
-        if (isRecord(part.functionResponse) && part.functionResponse.name === "read") {
+        if (isRecord(part.functionResponse) && names.has(part.functionResponse.name)) {
           return `Client tool result (data): ${JSON.stringify(part.functionResponse.response)}`;
         }
       }
@@ -107,7 +111,7 @@ function failure(status: number, message: string): ForwardedResponse {
 
 /** Private stdio protocol; credentials and prompts never appear in argv or stderr. */
 export function runWebWorker(
-  payload: Record<string, unknown>, signal?: AbortSignal, bridge?: ReadBridge,
+  payload: Record<string, unknown>, signal?: AbortSignal, bridge?: ToolBridge,
 ): Promise<ForwardedResponse> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
   return new Promise((resolve, reject) => {
@@ -203,14 +207,14 @@ export async function forwardRequest(
   account: AccountRuntime, body: RequestBody, _headers: Record<string, string>, signal?: AbortSignal,
 ): Promise<ForwardedResponse> {
   let prompt: string;
-  let bridge: ReadBridge | undefined;
+  let bridge: ToolBridge | undefined;
   try {
     prompt = buildWebPrompt(body);
     if (isRecord(body.request)) {
-      const declaration = readDeclaration(body.request);
+      const declarations = toolDeclarations(body.request);
       const config = isRecord(body.request.toolConfig) ? body.request.toolConfig.functionCallingConfig : undefined;
-      if (declaration && !(isRecord(config) && config.mode === "NONE")) {
-        bridge = createReadBridge(declaration);
+      if (declarations.length && !(isRecord(config) && config.mode === "NONE")) {
+        bridge = createToolBridge(declarations);
         prompt += `\n\n${bridge.instruction}`;
         if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError("Gemini Web text context is limited to 48000 UTF-8 bytes");
       }

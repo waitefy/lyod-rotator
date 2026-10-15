@@ -14,7 +14,7 @@ import { buildWebPrompt, runWebWorker, webCapabilityError } from "../src/provide
 import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
 import type { AccountRuntime } from "../src/types.js";
-import { createReadBridge } from "../src/providers/gemini-web/read-tool.js";
+import { createToolBridge, toolDeclarations } from "../src/providers/gemini-web/tool-bridge.js";
 import { handleCliLoginApi } from "../src/onboarding.js";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -24,6 +24,13 @@ import { initDb } from "../src/db-store.js";
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
   type: "object", properties: { path: { type: "string" }, i: { type: "string" }, offset: { type: "integer" } }, required: ["path", "i"],
 } } };
+const globTool = { type: "function" as const, function: { name: "glob", parameters: {
+  type: "object", properties: { i: { type: "string" }, path: { type: "string" }, hidden: { type: "boolean" }, limit: { type: "number" } }, required: ["i"],
+} } };
+const grepTool = { type: "function" as const, function: { name: "grep", parameters: {
+  type: "object", properties: { i: { type: "string" }, pattern: { type: "string" }, path: { type: "string" }, skip: { type: ["number", "null"] } }, required: ["pattern", "i"],
+} } };
+const searchTools = [readTool, globTool, grepTool];
 const GEMINI_WEB_MODEL = GEMINI_WEB_MODELS[0];
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
@@ -102,7 +109,32 @@ describe("Gemini Web integration", () => {
     }
   });
 
-  it("accepts only read, preserves its history and validates framed arguments", () => {
+  it("accepts OMP search schemas and validates tool selection, nullable values and history", () => {
+    const original = { model: GEMINI_WEB_MODEL, tools: searchTools, messages: [{ role: "user" as const, content: "search" }] };
+    assert.equal(webCapabilityError(original), undefined);
+    const translated = openAIToAntigravityBody(original);
+    assert.doesNotThrow(() => buildWebPrompt(translated));
+    const bridge = createToolBridge(toolDeclarations(translated.request as Record<string, unknown>));
+    const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+    for (const [name, args] of [["glob", { i: "Find", path: "**/*.ts", hidden: false, limit: 10 }],
+      ["glob", { i: "List" }], ["grep", { i: "Search", pattern: "ARGON", skip: null }]] as const) {
+      assert.deepEqual(bridge.parse(marker + JSON.stringify({ name, arguments: args })), { functionCall: { name, args } });
+    }
+    for (const [name, args] of [["bash", {}], ["grep", { i: "Search" }], ["grep", { i: "Search", pattern: "x", skip: -1 }],
+      ["glob", { i: "Find", hidden: "true" }], ["glob", { i: "Find", command: "pwd" }]]) {
+      assert.throws(() => bridge.parse(marker + JSON.stringify({ name, arguments: args })));
+    }
+    assert.ok(webCapabilityError({ ...original, tools: [...searchTools, readTool] }));
+    assert.ok(webCapabilityError({ ...original, messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "bash" } }] }] }));
+    for (const name of ["glob", "grep"]) {
+      const history = openAIToAntigravityBody({ ...original, messages: [...original.messages,
+        { role: "assistant", content: null, tool_calls: [{ id: "call_search", type: "function", function: { name, arguments: '{"i":"Search"}' } }] },
+        { role: "tool", tool_call_id: "call_search", content: "SEARCH_RESULT_OK" }] });
+      assert.match(buildWebPrompt(history), /SEARCH_RESULT_OK/);
+    }
+  });
+
+  it("accepts read, preserves its history and validates framed arguments", () => {
     const original: Parameters<typeof openAIToAntigravityBody>[0] = { model: GEMINI_WEB_MODEL, tools: [readTool], messages: [
       { role: "user", content: "read a file" },
       { role: "assistant", content: null, tool_calls: [{ id: "call_read", type: "function", function: { name: "read", arguments: '{"path":"a.txt","i":"Read"}' } }] },
@@ -114,8 +146,8 @@ describe("Gemini Web integration", () => {
     assert.match(prompt, /random fixture result/);
     assert.ok(webCapabilityError({ ...original, tools: [{ type: "function", function: { ...readTool.function, name: "bash" } }] }));
     assert.ok(webCapabilityError({ ...original, tool_choice: "required" }));
-    const bridge = createReadBridge(readTool.function);
-    const marker = bridge.instruction.match(/ROTATOR_READ_[a-f0-9-]+/)![0];
+    const bridge = createToolBridge([readTool.function]);
+    const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
     assert.deepEqual(bridge.parse(`${marker}{"name":"read","arguments":{"path":"a.txt","i":"Read"}}`), {
       functionCall: { name: "read", args: { path: "a.txt", i: "Read" } },
     });
@@ -300,31 +332,35 @@ else:
       });
       await fakePython(`import json, sys, re
 prompt = json.load(sys.stdin)['prompt']
-marker = re.search(r'ROTATOR_READ_[a-f0-9-]+', prompt).group(0)
-text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':'read','arguments':{'path':'fixture.txt','i':'Read fixture'}})
+marker = re.search(r'ROTATOR_TOOL_[a-f0-9-]+', prompt).group(0)
+name = 'grep' if 'REQUEST_GREP' in prompt else 'glob' if 'REQUEST_GLOB' in prompt else 'read'
+args = {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'path':'fixture.txt','i':'Read fixture'}
+text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':name,'arguments':args})
 for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
     print(json.dumps(event), flush=True)`, async () => {
+        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"]]) {
         for (const stream of [false, true]) {
-          const messages: unknown[] = [{ role: "user", content: "Read fixture.txt" }];
+          const messages: unknown[] = [{ role: "user", content }];
           const send = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: [readTool], messages, stream }) });
+            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: searchTools, messages, stream }) });
           const response = await send();
           assert.equal(response.status, 200);
           if (stream) {
             const text = await response.text();
             assert.match(text, /"tool_calls"/);
             assert.match(text, /"finish_reason":"tool_calls"/);
-            assert.doesNotMatch(text, /ROTATOR_READ_/);
+            assert.doesNotMatch(text, /ROTATOR_TOOL_/);
           } else {
             const result = await response.json();
             const call = result.choices[0].message.tool_calls[0];
-            assert.equal(call.function.name, "read");
-            assert.deepEqual(JSON.parse(call.function.arguments), { path: "fixture.txt", i: "Read fixture" });
+            assert.equal(call.function.name, name);
+            assert.deepEqual(JSON.parse(call.function.arguments), name === "grep" ? { pattern: "fixture", i: "Search fixture" } : { path: "fixture.txt", i: "Read fixture" });
             messages.push(result.choices[0].message, { role: "tool", tool_call_id: call.id, content: "FILE_ROUND_TRIP_OK" });
             const final = await send();
             assert.equal(final.status, 200);
             assert.equal((await final.json()).choices[0].message.content, "FILE_ROUND_TRIP_OK");
           }
+        }
         }
       });
     } finally {

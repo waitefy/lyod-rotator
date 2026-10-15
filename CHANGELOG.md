@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Extend the experimental client tool bridge to OMP `glob` and `grep` alongside `read`, with per-tool schema validation, nullable arguments and sequential search/read history. Keep execution on the API client.
+
 - Publish three Gemini Web Argon models: `gemini-4-argon-web-low`, `-medium`, and `-high`, with fixed web thinking levels (1, 4, 2). Keep the former id as an unlisted Low alias. Check both wire selectors, cancellation cleanup, model routing and fixed-level behavior; verify real Google generation at all three levels.
 
 - Add the optional `gemini-web` provider with strict discovery of available Gemini 4 Argon, text history, streaming, cancellation and one request per session.
