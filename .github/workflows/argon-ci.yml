@@ -1,0 +1,118 @@
+name: Argon fork checks
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Exact source commit to validate (defaults to the triggering commit)'
+        type: string
+        default: ''
+      upstream-commit:
+        description: 'Expected upstream base commit for a prepared update'
+        type: string
+        default: ''
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Argon typecheck and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate fork provenance
+        env:
+          ROTATOR_EXPECTED_UPSTREAM_COMMIT: ${{ inputs.upstream-commit }}
+        run: node scripts/check-fork-base.mjs --require-clean
+
+      - name: Test provenance validation
+        run: node --test scripts/check-fork-base.test.mjs scripts/sync-upstream.test.mjs
+
+      - name: Run typecheck, tests, and lint
+        run: npm run check
+
+      - name: Run Gemini Web worker and session tests
+        run: npm run test:gemini-web
+
+      - name: Run OMP integration tests
+        run: node --test scripts/omp-gemini-web.test.mjs
+
+      - name: Run coverage
+        run: npm run coverage
+
+      - name: Upload coverage to artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/
+          retention-days: 14
+
+  container:
+    name: Argon image and startup
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Read source commit and package version
+        id: package
+        run: |
+          node -p '"version=" + require("./package.json").version' >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build local test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gemini-web
+          load: true
+          push: false
+          tags: rotator-argon:ci
+          build-args: |
+            ROTATOR_VERSION=${{ steps.package.outputs.version }}
+            VCS_REF=${{ steps.package.outputs.commit }}
+            VCS_URL=${{ github.server_url }}/${{ github.repository }}
+            SOURCE_STATE=clean
+          cache-from: type=gha,scope=argon-amd64
+          cache-to: type=gha,mode=max,scope=argon-amd64
+
+      - name: Check runtime, pinned client and HTTP startup without credentials
+        env:
+          ROTATOR_EXPECTED_COMMIT: ${{ steps.package.outputs.commit }}
+        run: node scripts/smoke-gemini-web-image.mjs rotator-argon:ci

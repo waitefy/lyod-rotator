@@ -62,6 +62,30 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, [])
         self.assertEqual(self.saves, [])
 
+    async def test_large_unicode_request_crosses_socket_without_truncation(self):
+        path = str(Path(self.temp.name) / "large.sock")
+        prompt = "Я🌍" * 80000 + "SOCKET_PROMPT_END"
+        payload = {**self.payload, "prompt": prompt}
+        raw = (json.dumps(payload) + "\n").encode()
+        self.assertGreater(len(raw), 256000)
+        server = await asyncio.start_unix_server(
+            self.session.handle, path=path, limit=session.worker.MAX_INPUT_BYTES + 1
+        )
+        try:
+            reader, writer = await asyncio.open_unix_connection(path)
+            writer.write(raw)
+            await writer.drain()
+            events = []
+            while line := await asyncio.wait_for(reader.readline(), 5):
+                events.append(json.loads(line))
+            writer.close()
+            await writer.wait_closed()
+            self.assertEqual([event["type"] for event in events], ["ready", "delta", "done"])
+            self.assertEqual(self.clients[0].prompt, prompt)
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_socket_disconnect_cancels_generation_and_next_request_recovers(self):
         started, released = asyncio.Event(), asyncio.Event()
         class Stalled(Client):

@@ -36,7 +36,8 @@ export interface ToolBridge {
 
 function validValue(value: unknown, property: Record<string, unknown>): boolean {
   const types = Array.isArray(property.type) ? property.type : [property.type];
-  if (value === null) return property.nullable === true || types.includes("null");
+  if (value === null) return (property.nullable === true || types.includes("null")) &&
+    (!Array.isArray(property.enum) || property.enum.includes(null));
   if (!types.some((type) => type === "integer" ? Number.isSafeInteger(value) :
     ["string", "number", "boolean"].includes(String(type)) && typeof value === type)) return false;
   if (typeof value === "string" && value.includes("\0")) return false;

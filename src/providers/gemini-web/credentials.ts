@@ -16,7 +16,9 @@ export function getWebThinkingLevel(model: string): "low" | "medium" | "high" | 
   return undefined;
 }
 // A conservative wrapper limit, not a claim about Gemini App's native context.
-export const GEMINI_WEB_CONTEXT = 16000;
+export const GEMINI_WEB_CONTEXT = 262144;
+// Reserve ample UTF-8 space for history and tool framing; mirror in worker.py.
+export const GEMINI_WEB_MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 
 export function getCookiesFile(config: AccountConfig): string | undefined {
   return getCredential(config, GEMINI_WEB_PROVIDER)?.cookiesFile;

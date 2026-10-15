@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Raise the Gemini Web prompt budget from 48,000 UTF-8 bytes to 4 MiB and the client context estimate to 262,144 tokens. Size the internal JSON channel for escaping expansion; preserve large Unicode tool results and keep an explicit byte limit.
+
 - Bridge foreground OMP `bash` commands alongside the five file tools. Preserve command output and failure status; execute under the client permissions. Reject background, interactive and named service requests.
 
 - Add a local OMP extension that selects the supported file tools for Argon during normal launches and restores the former tool set and thinking level when leaving Argon. Respect explicitly restricted tool sets.

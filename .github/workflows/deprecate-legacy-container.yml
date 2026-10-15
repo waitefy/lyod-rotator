@@ -5,6 +5,7 @@ on:
 
 jobs:
   deprecate:
+    if: github.repository == 'tuxevil/tuxevil-rotator'
     runs-on: ubuntu-latest
     permissions:
       packages: write

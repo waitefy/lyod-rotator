@@ -6,12 +6,12 @@ import type { AccountRuntime } from "../../types.js";
 import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
-import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, getCookiesFile } from "./credentials.js";
+import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, GEMINI_WEB_MAX_PROMPT_BYTES, getCookiesFile } from "./credentials.js";
 import { createToolBridge, isToolDeclaration, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
 
 const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
 const ENDPOINT = "https://gemini.google.com/app";
-const MAX_PROMPT_BYTES = 48000;
+const MAX_PROMPT_BYTES = GEMINI_WEB_MAX_PROMPT_BYTES;
 const WORKER_TIMEOUT_MS = 480000;
 
 export class WebRequestError extends Error {}
@@ -112,7 +112,7 @@ function failure(status: number, message: string): ForwardedResponse {
 /** Private stdio protocol; credentials and prompts never appear in argv or stderr. */
 export function runWebWorker(
   payload: Record<string, unknown>, signal?: AbortSignal, bridge?: ToolBridge,
-): Promise<ForwardedResponse> {
+): Promise<ForwardedResponse & { retryToolCall?: boolean }> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
   return new Promise((resolve, reject) => {
     const child = spawn(process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3", [WORKER], {
@@ -133,13 +133,19 @@ export function runWebWorker(
     const stop = (): void => {
       if (child.exitCode === null) child.kill("SIGTERM");
     };
-    const fail = (status: number, message: string): void => {
+    const startResponse = (): void => {
+      settled = true;
+      resolve({ endpoint: ENDPOINT, response: new Response(Readable.toWeb(output) as ReadableStream<Uint8Array>, {
+        headers: { "Content-Type": "text/event-stream", "X-Rotator-Usage": "unavailable", "X-Rotator-Provider-Mode": "limited-web" },
+      }) });
+    };
+    const fail = (status: number, message: string, retryToolCall = false): void => {
       if (done) return;
       done = true;
       cleanup();
       stop();
-      if (ready) output.destroy(new Error(message));
-      else if (!settled) { settled = true; resolve(failure(status, message)); }
+      if (settled) output.destroy(new Error(message));
+      else { settled = true; output.destroy(); resolve({ ...failure(status, message), retryToolCall }); }
     };
     const abort = (): void => {
       if (done) return;
@@ -168,10 +174,8 @@ export function runWebWorker(
           fail(status, typeof event.message === "string" ? event.message : "Gemini Web request failed");
         } else if (event.type === "ready" && !ready) {
           ready = true;
-          settled = true;
-          resolve({ endpoint: ENDPOINT, response: new Response(Readable.toWeb(output) as ReadableStream<Uint8Array>, {
-            headers: { "Content-Type": "text/event-stream", "X-Rotator-Usage": "unavailable", "X-Rotator-Provider-Mode": "limited-web" },
-          }) });
+          // Tool output is already buffered: validate it before committing HTTP 200.
+          if (!bridge) startResponse();
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
           if (bridge) {
             buffered += event.text;
@@ -185,8 +189,11 @@ export function runWebWorker(
           }
         } else if (event.type === "done" && ready) {
           if (bridge) {
-            if (event.truncated) throw new Error("Incomplete tool response");
-            const part = bridge.parse(buffered);
+            if (event.truncated) { fail(502, "Gemini Web tool response exceeded the output limit"); return; }
+            let part: Record<string, unknown>;
+            try { part = bridge.parse(buffered); }
+            catch { fail(502, "Gemini Web generated an invalid tool call", true); return; }
+            startResponse();
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [part] } }] })}\n\n`);
           }
           done = true;
@@ -216,13 +223,20 @@ export async function forwardRequest(
       if (declarations.length && !(isRecord(config) && config.mode === "NONE")) {
         bridge = createToolBridge(declarations);
         prompt += `\n\n${bridge.instruction}`;
-        if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError("Gemini Web text context is limited to 48000 UTF-8 bytes");
+        if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError(`Gemini Web text context is limited to ${MAX_PROMPT_BYTES} UTF-8 bytes`);
       }
     }
   }
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
-  return runWebWorker({
+  const payload = {
     mode: "generate", prompt, thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
     proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
-  }, signal, bridge);
+  };
+  const result = await runWebWorker(payload, signal, bridge);
+  if (!result.retryToolCall || !bridge) return result;
+  // No tool has reached the client, so retrying cannot repeat a local action.
+  const correctedPrompt = prompt + "\n\nYour previous response was rejected before executing any tools. Return exactly ONE tool call using the marker above and a valid JSON object matching its declared schema. Include all required arguments. Do not add markdown, explanations or a second call. Wait for the client result before continuing.";
+  if (Buffer.byteLength(correctedPrompt) > MAX_PROMPT_BYTES) return result;
+  await result.response.body?.cancel();
+  return runWebWorker({ ...payload, prompt: correctedPrompt }, signal, bridge);
 }

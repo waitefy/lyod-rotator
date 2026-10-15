@@ -10,7 +10,10 @@ from pathlib import Path
 import re
 import sys
 
-MAX_INPUT_BYTES = 256_000
+# Mirror GEMINI_WEB_MAX_PROMPT_BYTES in credentials.ts.
+MAX_PROMPT_BYTES = 4 * 1024 * 1024
+# JSON escaping can expand one input byte into six (e.g. control characters).
+MAX_INPUT_BYTES = MAX_PROMPT_BYTES * 6 + 65_536
 MAX_OUTPUT_CHARS = 128_000
 SESSION_LOCK_WAIT_SECONDS = 60
 ARGON_NAME = re.compile(r"(?:\bgemini[\s_-]*4[\s_-]*argon\b|^argon$)", re.I)
@@ -103,8 +106,8 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
         if level is not None and (not isinstance(level, str) or level not in THINKING_LEVELS):
             raise WorkerError(400, "Gemini Web thinking level must be low, medium or high")
         prompt = payload.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 48_000:
-            raise WorkerError(400, "Gemini Web requires a text prompt of at most 48000 UTF-8 bytes")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > MAX_PROMPT_BYTES:
+            raise WorkerError(400, f"Gemini Web requires a text prompt of at most {MAX_PROMPT_BYTES} UTF-8 bytes")
     cookies_path = payload.get("cookiesFile")
     if not isinstance(cookies_path, str) or not Path(cookies_path).is_absolute():
         raise WorkerError(401, "Gemini Web requires an absolute cookie file path")

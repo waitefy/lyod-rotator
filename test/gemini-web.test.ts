@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -9,7 +9,7 @@ import type { AccountRotator } from "../src/rotator.js";
 import { resolveModelRoute } from "../src/model-catalog.js";
 import { findProviderForModel, getProviderIdForPoolKey } from "../src/providers/registry.js";
 import { geminiWebAdapter } from "../src/providers/gemini-web/index.js";
-import { GEMINI_WEB_MODEL as LEGACY_MODEL, GEMINI_WEB_MODELS, getWebThinkingLevel, validateCredentials } from "../src/providers/gemini-web/credentials.js";
+import { GEMINI_WEB_MODEL as LEGACY_MODEL, GEMINI_WEB_MODELS, GEMINI_WEB_MAX_PROMPT_BYTES, getWebThinkingLevel, validateCredentials } from "../src/providers/gemini-web/credentials.js";
 import { buildWebPrompt, runWebWorker, webCapabilityError } from "../src/providers/gemini-web/forward.js";
 import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
@@ -81,6 +81,7 @@ describe("Gemini Web integration", () => {
     assert.deepEqual(buildOpenAIModelCatalog(source(true) as never).filter((m) => m.owned_by === "gemini-web").map((m) => m.id), GEMINI_WEB_MODELS);
     assert.equal(buildOpenAIModelCatalog(source(true) as never).some((m) => m.id === LEGACY_MODEL), false);
     assert.equal(entry.owned_by, "gemini-web");
+    assert.equal(entry.context_window, 262144);
     assert.equal(entry.meta.tool_calling, false);
     assert.equal(entry.meta.multimodal, false);
     assert.equal(entry.meta.usage_unavailable, true);
@@ -109,10 +110,22 @@ describe("Gemini Web integration", () => {
     for (const text of ["Keep it short.", "Привет", "Здравствуйте", "🌍"]) assert.ok(prompt.includes(text));
     assert.throws(() => buildWebPrompt({ ...body, request: { contents: [{ role: "user", parts: [{ inlineData: { data: "abc" } }] }] } }), /text only/);
     assert.throws(() => buildWebPrompt({ ...body, request: { tools: [{}] } }), /API tool/);
-    assert.throws(() => buildWebPrompt(openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, messages: [{ role: "user", content: "🌍".repeat(12001) }] })), /UTF-8/);
+    assert.throws(() => buildWebPrompt(openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, messages: [{ role: "user", content: "🌍".repeat(GEMINI_WEB_MAX_PROMPT_BYTES / 4 + 1) }] })), /UTF-8/);
     assert.ok(webCapabilityError({ response_format: { type: "json_schema" } }));
     assert.ok(webCapabilityError({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.test/img" } }] }] }));
     assert.equal(webCapabilityError({ messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] }), undefined);
+  });
+
+  it("accepts large Unicode tool history without dropping results", () => {
+    const content = "Я🌍".repeat(80000) + "LARGE_TOOL_RESULT_END";
+    const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: allTools, messages: [
+      { role: "user", content: "Read the file" },
+      { role: "assistant", content: null, tool_calls: [{ id: "large_read", type: "function", function: { name: "read", arguments: '{"path":"file.txt","i":"Read"}' } }] },
+      { role: "tool", tool_call_id: "large_read", content },
+    ] });
+    const prompt = buildWebPrompt(body);
+    assert.ok(Buffer.byteLength(prompt) > 48000);
+    assert.ok(prompt.includes(content));
   });
 
   it("never treats a busy session or web authentication failure as successful upstream output", async () => {
@@ -228,6 +241,94 @@ describe("private worker protocol", () => {
       else process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON = previous;
     }
   }
+
+  it("rejects malformed tool calls before committing HTTP 200", async () => {
+    const bridge = createToolBridge([readTool.function]);
+    const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+    await fakePython(`import json,sys
+json.load(sys.stdin)
+for event in [{'type':'ready'},{'type':'delta','text':${JSON.stringify(marker)} + '{broken'},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const result = await runWebWorker({}, undefined, bridge);
+      assert.equal(result.response.status, 502);
+      assert.match(await result.response.text(), /invalid tool call/);
+    });
+  });
+
+  it("retries a rejected tool call once without executing it", async () => {
+    const counter = join(temp, "tool-retry-counter");
+    await fakePython(`import json,sys,re,pathlib
+request=json.load(sys.stdin)
+counter=pathlib.Path(${JSON.stringify(counter)})
+attempt=int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(attempt))
+marker=re.search(r'ROTATOR_TOOL_[a-f0-9-]+',request['prompt']).group(0)
+if attempt == 2:
+ assert 'rejected before executing any tools' in request['prompt']
+text=marker + ('{broken' if attempt == 1 else json.dumps({'name':'read','arguments':{'path':'package.json','i':'Read package'}}))
+for event in [{'type':'ready'},{'type':'delta','text':text},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: [readTool], messages: [{ role: "user", content: "Read package.json" }] });
+      const result = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
+      assert.equal(result.response.status, 200);
+      const raw = await result.response.text();
+      assert.match(raw, /"functionCall":\{"name":"read"/);
+      assert.doesNotMatch(raw, /broken/);
+      assert.equal(await readFile(counter, "utf8"), "2");
+    });
+  });
+
+  it("stops after two rejected tool calls and returns a regular HTTP error", async () => {
+    const counter = join(temp, "tool-retry-limit-counter");
+    await fakePython(`import json,sys,re,pathlib
+request=json.load(sys.stdin)
+counter=pathlib.Path(${JSON.stringify(counter)})
+counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
+marker=re.search(r'ROTATOR_TOOL_[a-f0-9-]+',request['prompt']).group(0)
+for event in [{'type':'ready'},{'type':'delta','text':marker+'{broken'},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: [readTool], messages: [{ role: "user", content: "Read package.json" }] });
+      const result = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
+      assert.equal(result.response.status, 502);
+      assert.match(await result.response.text(), /invalid tool call/);
+      assert.equal(await readFile(counter, "utf8"), "2");
+    });
+  });
+
+  it("does not retry authentication, worker protocol or truncated response failures", async () => {
+    for (const kind of ["auth", "protocol", "truncated"]) {
+      const counter = join(temp, "no-tool-retry-" + kind);
+      await fakePython(`import json,sys,pathlib
+json.load(sys.stdin)
+counter=pathlib.Path(${JSON.stringify(counter)})
+counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
+kind=${JSON.stringify(kind)}
+if kind == 'protocol':
+ print('broken',flush=True)
+else:
+ events=[{'type':'error','status':401,'message':'session expired'}] if kind == 'auth' else [{'type':'ready'},{'type':'delta','text':'partial'},{'type':'done','truncated':True}]
+ for event in events: print(json.dumps(event),flush=True)`, async () => {
+        const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: [readTool], messages: [{ role: "user", content: "Read package.json" }] });
+        const result = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
+        assert.equal(result.response.status, kind === "auth" ? 401 : 502);
+        const text = await result.response.text();
+        assert.match(text, kind === "auth" ? /session expired/ : kind === "protocol" ? /Invalid Gemini Web worker response/ : /output limit/);
+        assert.equal(await readFile(counter, "utf8"), "1");
+      });
+    }
+  });
+
+  it("cancels a tool response while waiting for validation", async () => {
+    await fakePython(`import json,sys,time
+json.load(sys.stdin)
+print(json.dumps({'type':'ready'}),flush=True)
+time.sleep(30)`, async () => {
+      const controller = new AbortController();
+      const pending = runWebWorker({}, controller.signal, createToolBridge([readTool.function]));
+      setTimeout(() => controller.abort(), 100);
+      await assert.rejects(pending, /cancelled/);
+    });
+  });
 
   it("fixes the worker thinking level by model id even if the client supplies effort", async () => {
     for (const id of GEMINI_WEB_MODELS) {

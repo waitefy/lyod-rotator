@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements-gemini-web.txt ./
+COPY requirements-gemini-web.txt fork-base.json ./
 RUN python3 -m venv /opt/gemini-web \
     && /opt/gemini-web/bin/pip install --no-cache-dir -r requirements-gemini-web.txt
 COPY package*.json ./
@@ -11,6 +11,21 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node bin ./bin
 COPY --chown=node:node src ./src
 COPY --chown=node:node README.md CHANGELOG.md LICENSE ./
+ARG ROTATOR_VERSION=unknown
+ARG VCS_REF=unknown
+ARG VCS_URL=local
+ARG SOURCE_STATE=unknown
+LABEL org.opencontainers.image.version=$ROTATOR_VERSION \
+    org.opencontainers.image.revision=$VCS_REF \
+    org.opencontainers.image.source=$VCS_URL
+RUN node --input-type=module -e '\
+    import { readFileSync, writeFileSync } from "node:fs"; \
+    const upstream = JSON.parse(readFileSync("fork-base.json", "utf8")); \
+    const version = JSON.parse(readFileSync("package.json", "utf8")).version; \
+    const pinned = readFileSync("requirements-gemini-web.txt", "utf8").match(/gemini-webapi\s*@\s*git\+([^\s]+)@([a-f0-9]{40})/); \
+    if (!pinned) throw new Error("Gemini Web client must be pinned to a commit"); \
+    if (process.env.ROTATOR_VERSION !== "unknown" && process.env.ROTATOR_VERSION !== version) throw new Error("Image version differs from package.json"); \
+    writeFileSync("build-info.json", JSON.stringify({ version, upstream, source: { commit: process.env.VCS_REF, repository: process.env.VCS_URL, state: process.env.SOURCE_STATE }, geminiWebapi: { repository: pinned[1], commit: pinned[2] } }, null, 2) + "\n");'
 RUN mkdir -p /data /sessions && chown -R node:node /app /data /sessions
 USER node
 ENV NODE_ENV=production \

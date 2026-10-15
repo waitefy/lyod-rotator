@@ -175,6 +175,24 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("PRIVATE", message)
         self.assertEqual(worker.safe_error(RuntimeError("PRIVATE"))[0], 502)
 
+    def test_large_unicode_prompt_reaches_client_intact(self):
+        prompt = "Я🌍" * 80000 + "LARGE_PROMPT_END"
+        client = Client([model("argon")], ["LARGE_OK"])
+        events = self.run_client(client, {**self.payload, "prompt": prompt})
+        self.assertEqual(client.prompt, prompt)
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_utf8_prompt_boundary_and_json_escaping_budget(self):
+        prompt = "🌍" * (worker.MAX_PROMPT_BYTES // 4)
+        client = Client([model("argon")], ["OK"])
+        self.run_client(client, {**self.payload, "prompt": prompt})
+        self.assertEqual(client.prompt, prompt)
+        with self.assertRaises(worker.WorkerError) as caught:
+            self.run_client(client, {**self.payload, "prompt": prompt + "x"})
+        self.assertEqual(caught.exception.status, 400)
+        escaped = json.dumps({**self.payload, "prompt": "\x01" * worker.MAX_PROMPT_BYTES}).encode()
+        self.assertLess(len(escaped), worker.MAX_INPUT_BYTES)
+
     def test_invalid_cookies_and_oversized_utf8_never_generate(self):
         client = Client([model("argon")], [])
         self.cookies.write_text("[]")
@@ -182,7 +200,7 @@ class WorkerTest(unittest.TestCase):
             self.run_client(client)
         self.assertEqual(caught.exception.status, 401)
         with self.assertRaises(worker.WorkerError) as caught:
-            self.run_client(client, {**self.payload, "prompt": "🌍" * 12001})
+            self.run_client(client, {**self.payload, "prompt": "🌍" * (worker.MAX_PROMPT_BYTES // 4 + 1)})
         self.assertEqual(caught.exception.status, 400)
         self.assertFalse(client.generated)
 

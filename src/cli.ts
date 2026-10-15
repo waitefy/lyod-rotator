@@ -150,7 +150,7 @@ switch (command) {
     const { initDb } = await import("./db-store.js");
     await initDb();
     const { printDoctorReport, runDoctor } = await import("./doctor.js");
-    const result = await runDoctor();
+    const result = await runDoctor(process.env, { geminiWebProbe: args.includes("--gemini-web-probe") });
     printDoctorReport(result);
     process.exit(result.ok ? 0 : 1);
     break;
@@ -393,6 +393,7 @@ switch (command) {
     console.log(
       "  tuxevil-rotator doctor    Validate config and local state",
     );
+    console.log("  tuxevil-rotator doctor --gemini-web-probe  Check Gemini App sessions and Argon access (no generation)");
     console.log(
       "  tuxevil-rotator migrate   Copy legacy config files safely",
     );
