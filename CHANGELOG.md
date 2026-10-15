@@ -1,5 +1,7 @@
 ## [4.2.0-argon.1] — local fork
 
+- Publish three Gemini Web Argon models: `gemini-4-argon-web-low`, `-medium`, and `-high`, with fixed web thinking levels (1, 4, 2). Keep the former id as an unlisted Low alias. Check both wire selectors, cancellation cleanup, model routing and fixed-level behavior; verify real Google generation at all three levels.
+
 - Add the optional `gemini-web` provider with strict discovery of available Gemini 4 Argon, text history, streaming, cancellation and one request per session.
 - Keep cookies in a private file and refresh cache, outside account JSON and request headers. Pin the unofficial Python web client to a source revision.
 - Reject unsupported tools/media/structured output; publish limited capabilities and unavailable usage in the model catalog.
@@ -9,7 +11,7 @@
 - Wait up to 60 seconds for a busy browser session instead of immediately rejecting overlapping client requests with HTTP 409. Preserve cancellation and exclusive upstream access.
 - Add dedicated Firefox login and automatic SSH session installation with rollback on failed verification. Keep one persistent Gemini client per account, refresh cookies in the background and restore the cache after restarts. Check session health on startup and reconnect existing accounts without restarting the rotator.
 - Detect Google email and stable account ID automatically in `rotator-gemini-login`. Isolate login profiles and session files, add new accounts or reconnect existing ones without flags, and preserve legacy account identifiers through a private identity index.
-- Prototype an experimental OpenAI Chat Completions `read` tool bridge with per-request framing, argument validation, client-side execution and full text results. Keep other tools unsupported. The full read tool round-trip with real Argon remains unverified.
+- Prototype an experimental OpenAI Chat Completions `read` tool bridge with per-request framing, argument validation, client-side execution and full text results. Keep other tools unsupported. The user confirmed a real OMP read tool round-trip against package.json.
 
 # Changelog
 

@@ -14,6 +14,51 @@ MAX_INPUT_BYTES = 256_000
 MAX_OUTPUT_CHARS = 128_000
 SESSION_LOCK_WAIT_SECONDS = 60
 ARGON_NAME = re.compile(r"(?:\bgemini[\s_-]*4[\s_-]*argon\b|^argon$)", re.I)
+# Gemini App's enum: STANDARD=1, EXTENDED=2, DEEP_THINK=3, MEDIUM=4.
+# Low / Medium / High are STANDARD / MEDIUM / EXTENDED, not 1 / 2 / 3.
+THINKING_LEVELS = {"low": 1, "medium": 4, "high": 2}
+MODEL_HEADER = "x-goog-ext-525001261-jspb"
+
+
+class ThinkingTransport:
+    """Adapt the pinned client's boolean thinking switch to the web enum."""
+    def __init__(self, transport, level):
+        self.transport, self.level = transport, level
+
+    def __getattr__(self, name):
+        return getattr(self.transport, name)
+
+    def stream(self, method, url, **kwargs):
+        if method == "POST" and str(url) == "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate":
+            try:
+                data = dict(kwargs["data"])
+                headers = dict(kwargs["headers"])
+                outer = json.loads(data["f.req"])
+                body = json.loads(outer[1])
+                selector = json.loads(headers[MODEL_HEADER])
+                if len(body) != 81 or len(selector) != 17 or body[80] not in (1, 2) or selector[15] != body[80]:
+                    raise ValueError()
+                body[80] = selector[15] = THINKING_LEVELS[self.level]
+                outer[1] = json.dumps(body, ensure_ascii=False)
+                data["f.req"] = json.dumps(outer, ensure_ascii=False)
+                headers[MODEL_HEADER] = json.dumps(selector)
+                kwargs.update(data=data, headers=headers)
+            except (KeyError, TypeError, ValueError, IndexError):
+                raise WorkerError(502, "Gemini Web thinking protocol changed; request was not sent") from None
+        return self.transport.stream(method, url, **kwargs)
+
+
+@contextlib.contextmanager
+def thinking_transport(client, level):
+    original = client.client
+    wrapper = ThinkingTransport(original, level)
+    client.client = wrapper
+    try:
+        yield
+    finally:
+        # Do not resurrect a transport the library closed after an upstream error.
+        if client.client is wrapper:
+            client.client = original
 
 
 class WorkerError(Exception):
@@ -54,6 +99,9 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
     if mode not in ("probe", "generate"):
         raise WorkerError(400, "Invalid Gemini Web worker operation")
     if mode == "generate":
+        level = payload.get("thinkingLevel")
+        if level is not None and (not isinstance(level, str) or level not in THINKING_LEVELS):
+            raise WorkerError(400, "Gemini Web thinking level must be low, medium or high")
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 48_000:
             raise WorkerError(400, "Gemini Web requires a text prompt of at most 48000 UTF-8 bytes")
@@ -98,33 +146,8 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
                 completed = {"type": "done"}
             else:
                 # Validate upstream before sending HTTP 200 to the downstream client.
-                async with contextlib.aclosing(
-                    client.generate_content_stream(payload["prompt"], model=model, temporary=True)
-                ) as stream:
-                    first = await anext(stream, None)
-                    if first is None:
-                        raise WorkerError(502, "Gemini Web returned no response")
-                    emit_event({"type": "ready"})
-                    count = 0
-                    truncated = False
-
-                    def send(output):
-                        nonlocal count, truncated
-                        delta = output.text_delta or ""
-                        remaining = MAX_OUTPUT_CHARS - count
-                        text = delta[:remaining]
-                        if text:
-                            emit_event({"type": "delta", "text": text})
-                            count += len(text)
-                        truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
-
-                    send(first)
-                    if not truncated:
-                        async for output in stream:
-                            send(output)
-                            if truncated:
-                                break
-                    completed = {"type": "done", "truncated": truncated}
+                with thinking_transport(client, level) if level is not None else contextlib.nullcontext():
+                    completed = await generate(client, payload, model, emit_event)
         finally:
             if not keep_open:
                 with contextlib.suppress(Exception):
@@ -132,6 +155,36 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
     # Flush refreshed cookies and release the session lock before acknowledging
     # completion, so the next conversation turn can start immediately.
     emit_event(completed)
+
+
+async def generate(client, payload, model, emit_event):
+    async with contextlib.aclosing(
+        client.generate_content_stream(payload["prompt"], model=model, temporary=True)
+    ) as stream:
+        first = await anext(stream, None)
+        if first is None:
+            raise WorkerError(502, "Gemini Web returned no response")
+        emit_event({"type": "ready"})
+        count = 0
+        truncated = False
+
+        def send(output):
+            nonlocal count, truncated
+            delta = output.text_delta or ""
+            remaining = MAX_OUTPUT_CHARS - count
+            text = delta[:remaining]
+            if text:
+                emit_event({"type": "delta", "text": text})
+                count += len(text)
+            truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
+
+        send(first)
+        if not truncated:
+            async for output in stream:
+                send(output)
+                if truncated:
+                    break
+        return {"type": "done", "truncated": truncated}
 
 
 def safe_error(error):

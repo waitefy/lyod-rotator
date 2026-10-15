@@ -6,6 +6,15 @@ import { getCredential } from "../credential-helpers.js";
 
 export const GEMINI_WEB_PROVIDER = "gemini-web";
 export const GEMINI_WEB_MODEL = "gemini-4-argon-web";
+export const GEMINI_WEB_MODELS = ["low", "medium", "high"].map((level) => `${GEMINI_WEB_MODEL}-${level}`);
+
+export function getWebThinkingLevel(model: string): "low" | "medium" | "high" | undefined {
+  const id = model.toLowerCase();
+  if (id === GEMINI_WEB_MODEL || id === `${GEMINI_WEB_MODEL}-low`) return "low";
+  if (id === `${GEMINI_WEB_MODEL}-medium`) return "medium";
+  if (id === `${GEMINI_WEB_MODEL}-high`) return "high";
+  return undefined;
+}
 // A conservative wrapper limit, not a claim about Gemini App's native context.
 export const GEMINI_WEB_CONTEXT = 16000;
 

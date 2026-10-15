@@ -8,7 +8,7 @@ import { getProviderProxyUrl } from "../credential-helpers.js";
 import type { ProviderAdapter } from "../adapter.js";
 import type { AccountConfig } from "../../types.js";
 import { SseEventAccumulator } from "../google-antigravity/forward.js";
-import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODEL, GEMINI_WEB_PROVIDER, getCookiesFile, validateCredentials } from "./credentials.js";
+import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODEL, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel, getCookiesFile, validateCredentials } from "./credentials.js";
 import { forwardRequest, runWebWorker } from "./forward.js";
 
 async function runLogin(): Promise<AccountConfig> {
@@ -79,8 +79,8 @@ export const geminiWebAdapter: ProviderAdapter = {
   },
   forwardRequest,
   createStreamAccumulator: () => new SseEventAccumulator(),
-  listModels: () => [{ id: GEMINI_WEB_MODEL, contextWindow: GEMINI_WEB_CONTEXT, quotaPool: GEMINI_WEB_PROVIDER, source: "catalog" }],
-  ownsModel: (model) => model.toLowerCase() === GEMINI_WEB_MODEL,
+  listModels: () => GEMINI_WEB_MODELS.map((id) => ({ id, contextWindow: GEMINI_WEB_CONTEXT, quotaPool: GEMINI_WEB_PROVIDER, source: "catalog" })),
+  ownsModel: (model) => getWebThinkingLevel(model) !== undefined,
   getPoolKey: () => GEMINI_WEB_PROVIDER,
   getKickstartModelForPool: () => undefined,
   getBenchmark: () => ({

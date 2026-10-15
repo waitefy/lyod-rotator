@@ -1,6 +1,6 @@
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
-import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODEL, GEMINI_WEB_PROVIDER } from "./providers/gemini-web/credentials.js";
+import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER } from "./providers/gemini-web/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import {
@@ -2720,9 +2720,10 @@ export function buildOpenAIModelCatalog(
       });
     }
   }
-  if (hasActiveProvider(GEMINI_WEB_PROVIDER) && served(GEMINI_WEB_PROVIDER)(GEMINI_WEB_MODEL)) {
+  for (const model of GEMINI_WEB_MODELS) {
+    if (!hasActiveProvider(GEMINI_WEB_PROVIDER) || !served(GEMINI_WEB_PROVIDER)(model)) continue;
     catalog.push({
-      id: GEMINI_WEB_MODEL, object: "model", created: 0, owned_by: GEMINI_WEB_PROVIDER,
+      id: model, object: "model", created: 0, owned_by: GEMINI_WEB_PROVIDER,
       context_window: GEMINI_WEB_CONTEXT, max_model_len: GEMINI_WEB_CONTEXT,
       meta: {
         context_length: GEMINI_WEB_CONTEXT, family: "gemini-web", provider: GEMINI_WEB_PROVIDER,

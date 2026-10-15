@@ -9,7 +9,7 @@ import type { AccountRotator } from "../src/rotator.js";
 import { resolveModelRoute } from "../src/model-catalog.js";
 import { findProviderForModel, getProviderIdForPoolKey } from "../src/providers/registry.js";
 import { geminiWebAdapter } from "../src/providers/gemini-web/index.js";
-import { GEMINI_WEB_MODEL, validateCredentials } from "../src/providers/gemini-web/credentials.js";
+import { GEMINI_WEB_MODEL as LEGACY_MODEL, GEMINI_WEB_MODELS, getWebThinkingLevel, validateCredentials } from "../src/providers/gemini-web/credentials.js";
 import { buildWebPrompt, runWebWorker, webCapabilityError } from "../src/providers/gemini-web/forward.js";
 import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
@@ -24,6 +24,7 @@ import { initDb } from "../src/db-store.js";
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
   type: "object", properties: { path: { type: "string" }, i: { type: "string" }, offset: { type: "integer" } }, required: ["path", "i"],
 } } };
+const GEMINI_WEB_MODEL = GEMINI_WEB_MODELS[0];
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
 before(async () => {
@@ -37,7 +38,14 @@ after(async () => {
 
 describe("Gemini Web integration", () => {
   it("routes the separate public id to the web provider and its own quota pool", () => {
-    assert.equal(findProviderForModel(GEMINI_WEB_MODEL)?.id, "gemini-web");
+    for (const [i, id] of GEMINI_WEB_MODELS.entries()) {
+      assert.equal(findProviderForModel(id)?.id, "gemini-web");
+      assert.deepEqual(resolveModelRoute({}, id), { kind: "provider", providerId: "gemini-web", modelId: id });
+      assert.equal(getWebThinkingLevel(id), ["low", "medium", "high"][i]);
+      assert.ok(buildWebPrompt(openAIToAntigravityBody({ model: id, messages: [{ role: "user", content: "test" }] })).includes("test"));
+    }
+    assert.equal(findProviderForModel(LEGACY_MODEL)?.id, "gemini-web");
+    assert.equal(getWebThinkingLevel("gemini-4-argon-web-ultra"), undefined);
     assert.equal(getProviderIdForPoolKey("gemini-web"), "gemini-web");
     assert.deepEqual(resolveModelRoute({}, GEMINI_WEB_MODEL), { kind: "provider", providerId: "gemini-web", modelId: GEMINI_WEB_MODEL });
     assert.equal(geminiWebAdapter.getKickstartModelForPool("gemini-web"), undefined);
@@ -50,6 +58,8 @@ describe("Gemini Web integration", () => {
     });
     assert.equal(buildOpenAIModelCatalog(source(false) as never).some((m) => m.id === GEMINI_WEB_MODEL), false);
     const entry = buildOpenAIModelCatalog(source(true) as never).find((m) => m.id === GEMINI_WEB_MODEL)!;
+    assert.deepEqual(buildOpenAIModelCatalog(source(true) as never).filter((m) => m.owned_by === "gemini-web").map((m) => m.id), GEMINI_WEB_MODELS);
+    assert.equal(buildOpenAIModelCatalog(source(true) as never).some((m) => m.id === LEGACY_MODEL), false);
     assert.equal(entry.owned_by, "gemini-web");
     assert.equal(entry.meta.tool_calling, false);
     assert.equal(entry.meta.multimodal, false);
@@ -129,6 +139,22 @@ describe("private worker protocol", () => {
       else process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON = previous;
     }
   }
+
+  it("fixes the worker thinking level by model id even if the client supplies effort", async () => {
+    for (const id of GEMINI_WEB_MODELS) {
+      await fakePython(`import json,sys
+request=json.load(sys.stdin)
+assert request['thinkingLevel']==${JSON.stringify(getWebThinkingLevel(id))}
+for event in [{'type':'ready'},{'type':'delta','text':'OK'},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+        const body = openAIToAntigravityBody({ model: id, reasoning_effort: "high", messages: [{ role: "user", content: "test" }] });
+        assert.equal(body.model, id);
+        const { response } = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
+        assert.equal(response.status, 200);
+        assert.match(await response.text(), /OK/);
+      });
+    }
+  });
 
   it("registers browser sessions only after a successful Argon probe and reports reconnect status", async () => {
     const cookiesFile = join(temp, "login-cookies.json");

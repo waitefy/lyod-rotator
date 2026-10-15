@@ -192,6 +192,58 @@ class WorkerTest(unittest.TestCase):
             self.run_client(client)
         self.assertEqual(caught.exception.status, 502)
 
+    def test_each_level_changes_both_wire_selectors_without_changing_other_fields(self):
+        body = [None] * 81
+        body[0], body[79], body[80] = ["fixture prompt"], 9, 1
+        header = [None] * 17
+        header[4], header[14], header[15], header[16] = "discovered-argon", 9, 1, "session-fixture"
+        kwargs = {"data": {"at": "token-fixture", "f.req": json.dumps([None, json.dumps(body)])},
+                  "headers": {worker.MODEL_HEADER: json.dumps(header), "other": "unchanged"}}
+        for level, value in (("low", 1), ("medium", 4), ("high", 2)):
+            captured = []
+            transport = SimpleNamespace(stream=lambda *args, **kw: captured.append((args, kw)))
+            wrapper = worker.ThinkingTransport(transport, level)
+            wrapper.stream("POST", "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", **kwargs)
+            sent = captured[0][1]
+            actual_body = json.loads(json.loads(sent["data"]["f.req"])[1])
+            actual_header = json.loads(sent["headers"][worker.MODEL_HEADER])
+            self.assertEqual(actual_body[80], value)
+            self.assertEqual(actual_header[15], value)
+            actual_body[80] = actual_header[15] = 1
+            self.assertEqual(actual_body, body)
+            self.assertEqual(actual_header, header)
+            self.assertEqual(sent["data"]["at"], "token-fixture")
+            self.assertEqual(sent["headers"]["other"], "unchanged")
+            self.assertEqual(json.loads(json.loads(kwargs["data"]["f.req"])[1])[80], 1)
+
+    def test_changed_protocol_never_sends_or_exposes_secrets(self):
+        called = []
+        wrapper = worker.ThinkingTransport(SimpleNamespace(stream=lambda *a, **k: called.append(True)), "medium")
+        with self.assertRaises(worker.WorkerError) as caught:
+            wrapper.stream("POST", "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+                           data={"f.req": "private-cookie-fixture"}, headers={})
+        self.assertEqual(called, [])
+        self.assertEqual(caught.exception.status, 502)
+        self.assertNotIn("private-cookie", caught.exception.message)
+
+    def test_transport_restores_on_cancellation_but_never_resurrects_closed_client(self):
+        original = SimpleNamespace(cookies={"fixture": "cookie"})
+        client = SimpleNamespace(client=original)
+        with self.assertRaises(asyncio.CancelledError):
+            with worker.thinking_transport(client, "medium"):
+                self.assertIs(client.client.cookies, original.cookies)
+                raise asyncio.CancelledError()
+        self.assertIs(client.client, original)
+        with worker.thinking_transport(client, "high"):
+            client.client = None
+        self.assertIsNone(client.client)
+
+    def test_unknown_level_rejected_before_client_initialization(self):
+        for value in ("ultra", 3, []):
+            with self.assertRaises(worker.WorkerError) as caught:
+                self.run_client(Client([model("argon")], []), {**self.payload, "thinkingLevel": value})
+            self.assertEqual(caught.exception.status, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

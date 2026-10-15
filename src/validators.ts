@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { GEMINI_WEB_MODEL } from "./providers/gemini-web/credentials.js";
+import { getWebThinkingLevel } from "./providers/gemini-web/credentials.js";
 import {
 	MAX_QUOTA_POLL_INTERVAL_MS,
 	MIN_QUOTA_POLL_INTERVAL_MS,
@@ -60,7 +60,7 @@ export function isKnownNonGoogleModel(model: string): boolean {
 	const trimmed = model.trim();
 	if (!trimmed) return false;
 	const lower = trimmed.toLowerCase();
-	if (isCodexRequestModel(trimmed) || lower === GEMINI_WEB_MODEL) return true;
+	if (isCodexRequestModel(trimmed) || getWebThinkingLevel(lower) !== undefined) return true;
 	if (isOpenCodeZenModel(trimmed) || isOpenCodeZenModel(lower)) return true;
 	return Object.keys(MODEL_TIER_ACCESS).some((k) => k.toLowerCase() === lower);
 }

@@ -6,7 +6,7 @@ import type { AccountRuntime } from "../../types.js";
 import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
-import { GEMINI_WEB_MODEL, GEMINI_WEB_PROVIDER, getCookiesFile } from "./credentials.js";
+import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, getCookiesFile } from "./credentials.js";
 import { createReadBridge, isReadDeclaration, readDeclaration, type ReadBridge } from "./read-tool.js";
 
 const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
@@ -45,7 +45,7 @@ export function webCapabilityError(value: unknown): string | undefined {
 
 /** Flatten a Gemini-shaped, text-only conversation. No native system role is promised. */
 export function buildWebPrompt(body: RequestBody): string {
-  if (body.model !== GEMINI_WEB_MODEL) throw new WebRequestError("Unknown Gemini Web model");
+  if (getWebThinkingLevel(body.model) === undefined) throw new WebRequestError("Unknown Gemini Web model");
   if (!isRecord(body.request)) throw new WebRequestError("Expected a text conversation");
   const request = body.request;
   let declaration: Record<string, unknown> | undefined;
@@ -218,7 +218,7 @@ export async function forwardRequest(
   }
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
   return runWebWorker({
-    mode: "generate", prompt, cookiesFile: getCookiesFile(account.config),
+    mode: "generate", prompt, thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
     proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
   }, signal, bridge);
 }
