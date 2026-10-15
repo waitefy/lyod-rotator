@@ -1,0 +1,189 @@
+"""Persistent session and disconnect tests; no Google requests or real credentials."""
+import asyncio
+import contextlib
+import json
+import os
+from pathlib import Path
+import sys
+import signal
+import subprocess
+import time
+import tempfile
+from types import SimpleNamespace
+import unittest
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "src/providers/gemini-web"))
+import session
+from gemini_web_worker_test import Client, model
+
+
+class SessionTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="gw-", dir="/tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.cookies = Path(self.temp.name) / "c.json"
+        self.cookies.write_text(json.dumps({"__Secure-1PSID": "fixture"}))
+        self.payload = {"mode": "generate", "cookiesFile": str(self.cookies), "prompt": "hello"}
+        self.clients, self.saves = [], []
+        def factory(*args, **kwargs):
+            client = Client([model("argon")], ["hello"])
+            self.clients.append(client)
+            return client
+        self.session = session.Session(self.payload, factory, self.saves.append)
+        self.addAsyncCleanup(self.session.close_client)
+
+    async def test_reuses_client_while_idle_and_reloads_changed_credentials(self):
+        events = []
+        await self.session.execute(self.payload, events.append)
+        first = self.clients[0]
+        self.assertFalse(first.closed)
+        tick = asyncio.Event()
+        async def background():
+            await asyncio.sleep(.01)
+            tick.set()
+        task = asyncio.create_task(background())
+        await tick.wait()
+        await task
+        await self.session.execute(self.payload, events.append)
+        self.assertEqual(len(self.clients), 1)
+        self.assertEqual(len(self.saves), 2)
+        self.assertEqual([e["type"] for e in events], ["ready", "delta", "done"] * 2)
+        self.cookies.write_text(json.dumps({"__Secure-1PSID": "new-fixture"}))
+        await self.session.execute(self.payload, events.append)
+        self.assertTrue(first.closed)
+        self.assertEqual(len(self.clients), 2)
+
+    async def test_errors_close_client_and_do_not_save_or_report_success(self):
+        self.session.client_factory = lambda *args, **kwargs: Client([model("Flash")], [])
+        events = []
+        with self.assertRaises(session.worker.WorkerError):
+            await self.session.execute(self.payload, events.append)
+        self.assertIsNone(self.session.client)
+        self.assertEqual(events, [])
+        self.assertEqual(self.saves, [])
+
+    async def test_socket_disconnect_cancels_generation_and_next_request_recovers(self):
+        started, released = asyncio.Event(), asyncio.Event()
+        class Stalled(Client):
+            async def generate_content_stream(self, *args, **kwargs):
+                started.set()
+                try:
+                    await asyncio.sleep(60)
+                    yield SimpleNamespace(text_delta="late")
+                finally:
+                    released.set()
+        self.session.client_factory = lambda *args, **kwargs: Stalled([model("argon")], [])
+        path = str(Path(self.temp.name) / "test.sock")
+        server = await asyncio.start_unix_server(self.session.handle, path=path)
+        try:
+            reader, writer = await asyncio.open_unix_connection(path)
+            writer.write((json.dumps(self.payload) + "\n").encode())
+            await writer.drain()
+            await asyncio.wait_for(started.wait(), 1)
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(released.wait(), 1)
+            for _ in range(20):
+                if not self.session.lock.locked():
+                    break
+                await asyncio.sleep(.01)
+            self.assertFalse(self.session.lock.locked())
+            self.assertIsNone(self.session.client)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_done_is_emitted_after_persistence(self):
+        order = []
+        self.session.save = lambda client: order.append("save")
+        await self.session.execute(self.payload, lambda event: order.append(event["type"]))
+        self.assertEqual(order, ["ready", "delta", "save", "done"])
+
+
+class ProcessTest(unittest.TestCase):
+    def test_worker_restarts_reuse_live_broker_and_broker_restart_restores_saved_state(self):
+        with tempfile.TemporaryDirectory(prefix="gw-proc-", dir="/tmp") as directory:
+            root = Path(directory)
+            package = root / "gemini_webapi"
+            package.mkdir()
+            (package / "__init__.py").write_text('''import asyncio,json,os
+from pathlib import Path
+from types import SimpleNamespace
+from .utils import save_cookies
+def set_log_level(level): pass
+class GeminiClient:
+ def __init__(self,*args,**kwargs):
+  self.task=None
+  path=Path(os.environ['GEMINI_COOKIE_PATH'])/'fixture-state.json'
+  self.cookies=json.loads(path.read_text()) if path.exists() else {'ticks':0}
+  self.cookies.update(pid=os.getpid(),initializations=0,closed=False)
+ async def init(self,**kwargs):
+  if self.task: return
+  self.cookies['initializations']+=1
+  self.task=asyncio.create_task(self.refresh())
+ async def refresh(self):
+  while True:
+   await asyncio.sleep(.02)
+   self.cookies['ticks']+=1
+   save_cookies(self.cookies)
+ def list_models(self): return [SimpleNamespace(model_name='argon',display_name='Argon',aliases=[],is_available=True)]
+ async def generate_content_stream(self,*args,**kwargs):
+  yield SimpleNamespace(text_delta='fixture answer')
+ async def close(self):
+  if self.task:
+   self.task.cancel()
+   try: await self.task
+   except asyncio.CancelledError: pass
+  self.cookies['closed']=True
+  save_cookies(self.cookies)
+''')
+            (package / "utils.py").write_text('''import json,os
+from pathlib import Path
+def save_cookies(cookies,**kwargs):
+ p=Path(os.environ['GEMINI_COOKIE_PATH'])/'fixture-state.json'
+ tmp=p.with_suffix('.tmp');tmp.write_text(json.dumps(cookies));tmp.replace(p)
+''')
+            cookies = root / "c.json"
+            cookies.write_text(json.dumps({"__Secure-1PSID": "fixture"}))
+            payload = {"mode": "generate", "cookiesFile": str(cookies), "prompt": "hello"}
+            _, cache, socket = session.session_paths(payload)
+            environment = dict(os.environ, PYTHONPATH=str(root))
+            worker_path = Path(__file__).parents[1] / "src/providers/gemini-web/worker.py"
+            def call():
+                response = subprocess.run([sys.executable, str(worker_path)], input=json.dumps(payload).encode(),
+                                          capture_output=True, env=environment, timeout=10)
+                self.assertEqual(response.returncode, 0, response.stderr.decode())
+                events = [json.loads(line) for line in response.stdout.splitlines()]
+                self.assertEqual([event["type"] for event in events], ["ready", "delta", "done"], events)
+                return json.loads((cache / "fixture-state.json").read_text())
+            def stop(pid):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGTERM)
+                for _ in range(100):
+                    if not socket.exists():
+                        return
+                    time.sleep(.01)
+                self.fail("broker did not stop")
+            active = None
+            try:
+                first = call()
+                active = first["pid"]
+                time.sleep(.1)
+                second = call()
+                self.assertEqual(second["pid"], first["pid"])
+                self.assertEqual(second["initializations"], 1)
+                self.assertGreater(second["ticks"], first["ticks"])
+                stop(active)
+                active = None
+                self.assertTrue(json.loads((cache / "fixture-state.json").read_text())["closed"])
+                third = call()
+                active = third["pid"]
+                self.assertNotEqual(third["pid"], first["pid"])
+                self.assertGreaterEqual(third["ticks"], second["ticks"])
+            finally:
+                if active is not None:
+                    stop(active)
+
+
+if __name__ == "__main__":
+    unittest.main()

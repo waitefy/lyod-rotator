@@ -1,4 +1,4 @@
-"""Private, one-request Gemini Web worker. stdout is an NDJSON protocol only."""
+"""Private Gemini Web protocol. Requests use a persistent, local session broker."""
 
 import asyncio
 import contextlib
@@ -49,7 +49,7 @@ def select_argon(models):
     raise WorkerError(404, "Gemini 4 Argon is not offered by this web session; no fallback was used")
 
 
-async def run(payload, client_factory=None):
+async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit):
     mode = payload.get("mode")
     if mode not in ("probe", "generate"):
         raise WorkerError(400, "Invalid Gemini Web worker operation")
@@ -94,7 +94,7 @@ async def run(payload, client_factory=None):
                 raise WorkerError(401, "Gemini Web session expired or was rejected; reconnect it")
             model = select_argon(client.list_models())
             if mode == "probe":
-                emit({"type": "ready"})
+                emit_event({"type": "ready"})
                 completed = {"type": "done"}
             else:
                 # Validate upstream before sending HTTP 200 to the downstream client.
@@ -104,7 +104,7 @@ async def run(payload, client_factory=None):
                     first = await anext(stream, None)
                     if first is None:
                         raise WorkerError(502, "Gemini Web returned no response")
-                    emit({"type": "ready"})
+                    emit_event({"type": "ready"})
                     count = 0
                     truncated = False
 
@@ -114,7 +114,7 @@ async def run(payload, client_factory=None):
                         remaining = MAX_OUTPUT_CHARS - count
                         text = delta[:remaining]
                         if text:
-                            emit({"type": "delta", "text": text})
+                            emit_event({"type": "delta", "text": text})
                             count += len(text)
                         truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
 
@@ -126,11 +126,12 @@ async def run(payload, client_factory=None):
                                 break
                     completed = {"type": "done", "truncated": truncated}
         finally:
-            with contextlib.suppress(Exception):
-                await client.close()
+            if not keep_open:
+                with contextlib.suppress(Exception):
+                    await client.close()
     # Flush refreshed cookies and release the session lock before acknowledging
     # completion, so the next conversation turn can start immediately.
-    emit(completed)
+    emit_event(completed)
 
 
 def safe_error(error):
@@ -165,7 +166,8 @@ def main():
                 raise ValueError()
         except (ValueError, TypeError):
             raise WorkerError(400, "Invalid Gemini Web worker request") from None
-        asyncio.run(run(payload))
+        from session import request
+        asyncio.run(request(payload))
     except Exception as error:
         status, message = safe_error(error)
         emit({"type": "error", "status": status, "message": message})
@@ -174,4 +176,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.modules["worker"] = sys.modules[__name__]
     raise SystemExit(main())

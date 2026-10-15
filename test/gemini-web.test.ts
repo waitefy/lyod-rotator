@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { buildOpenAIModelCatalog, openAIToAntigravityBody, handleOpenAIChatCompletions } from "../src/compat.js";
 import type { AccountRotator } from "../src/rotator.js";
 import { resolveModelRoute } from "../src/model-catalog.js";
@@ -15,13 +15,25 @@ import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
 import type { AccountRuntime } from "../src/types.js";
 import { createReadBridge } from "../src/providers/gemini-web/read-tool.js";
+import { handleCliLoginApi } from "../src/onboarding.js";
+import { Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { removeAccountFromConfig } from "../src/account-store.js";
+import { initDb } from "../src/db-store.js";
 
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
   type: "object", properties: { path: { type: "string" }, i: { type: "string" }, offset: { type: "integer" } }, required: ["path", "i"],
 } } };
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
-after(() => rm(temp, { recursive: true, force: true }));
+before(async () => {
+  process.env.TUXEVIL_ROTATOR_DIR ||= temp;
+  await initDb();
+});
+after(async () => {
+  await removeAccountFromConfig("web-login-fixture@local");
+  await rm(temp, { recursive: true, force: true });
+});
 
 describe("Gemini Web integration", () => {
   it("routes the separate public id to the web provider and its own quota pool", () => {
@@ -117,6 +129,32 @@ describe("private worker protocol", () => {
       else process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON = previous;
     }
   }
+
+  it("registers browser sessions only after a successful Argon probe and reports reconnect status", async () => {
+    const cookiesFile = join(temp, "login-cookies.json");
+    await writeFile(cookiesFile, JSON.stringify({ "__Secure-1PSID": "private-fixture" }));
+    for (const status of [200, 401, 404]) {
+      await fakePython(`import json,sys
+request=json.load(sys.stdin)
+assert request['mode']=='probe'
+events=[{'type':'ready'},{'type':'done'}] if ${status}==200 else [{'type':'error','status':${status},'message':'session rejected'}]
+for event in events: print(json.dumps(event),flush=True)`, async () => {
+        const updated: unknown[] = [];
+        let code = 0, text = "";
+        const req = Readable.from([Buffer.from(JSON.stringify({ provider: "gemini-web", email: "web-login-fixture@local", cookiesFile }))]) as IncomingMessage;
+        req.headers = {};
+        const res = { writeHead(value: number) { code = value; }, end(value: string) { text += value; } } as ServerResponse;
+        await handleCliLoginApi(req, res, { addOrUpdateAccount: async (entry) => { updated.push(entry); } });
+        assert.equal(code, status);
+        assert.equal(updated.length, status === 200 ? 1 : 0);
+        assert.doesNotMatch(text, /private-fixture/);
+        const account = { config: { email: "fixture", credentials: [{ provider: "gemini-web", cookiesFile }] } } as AccountRuntime;
+        await geminiWebAdapter.fetchQuota(account, {} as never);
+        const message = account.lastPollByProvider?.["gemini-web"];
+        assert.match(message ?? "", status === 200 ? /background refresh active/ : status === 401 ? /Reconnect/ : /Argon unavailable/);
+      });
+    }
+  });
 
   it("streams Unicode deltas through the existing Gemini accumulator without invented usage", async () => {
     await fakePython(`import json, sys

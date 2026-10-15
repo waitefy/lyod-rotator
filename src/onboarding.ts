@@ -32,6 +32,8 @@ import {
   type CodexOAuthConfig,
 } from "./providers/openai-codex/oauth.js";
 import type { AccountConfig, Config } from "./types.js";
+import { validateCredentials as validateWebCredentials } from "./providers/gemini-web/credentials.js";
+import { runWebWorker } from "./providers/gemini-web/forward.js";
 
 interface AccountSink {
   addOrUpdateAccount(account: AccountConfig): Promise<void>;
@@ -714,6 +716,7 @@ export async function handleCliLoginApi(
     redirectUrl?: string;
     email?: string;
     apiKey?: string;
+    cookiesFile?: string;
     model?: string;
     enabled?: boolean;
     shadowMode?: boolean;
@@ -730,6 +733,7 @@ export async function handleCliLoginApi(
       redirectUrl?: string;
       email?: string;
       apiKey?: string;
+      cookiesFile?: string;
       model?: string;
       enabled?: boolean;
       shadowMode?: boolean;
@@ -743,6 +747,30 @@ export async function handleCliLoginApi(
   }
 
   const provider = body.provider || "google-antigravity";
+
+  if (provider === "gemini-web") {
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const cookiesFile = typeof body.cookiesFile === "string" ? body.cookiesFile : "";
+    const entry: AccountConfig = { email, label: email.split("@")[0], credentials: [{ provider: "gemini-web", cookiesFile }] };
+    const validation = await validateWebCredentials(entry);
+    if (!email || email.length > MAX_ACCOUNT_EMAIL_LENGTH || !validation.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "A valid account identifier and private cookie file are required" }));
+      return;
+    }
+    const { response } = await runWebWorker({ mode: "probe", cookiesFile });
+    await response.text();
+    if (!response.ok) {
+      res.writeHead(response.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Gemini App sign-in rejected or Argon unavailable; reconnect the browser session" }));
+      return;
+    }
+    const { isNew } = await addAccountToConfig(entry);
+    await rotator.addOrUpdateAccount(entry);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, email, isNew }));
+    return;
+  }
 
   if (provider === "ollama") {
     await handleOllamaCliLogin(body, res, rotator);
