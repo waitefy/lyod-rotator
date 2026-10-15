@@ -93,7 +93,7 @@ export interface ProviderFeatures {
 export interface ProviderAdapter {
   readonly id: string;
   readonly displayName: string;
-  readonly credentialKind: "oauth" | "api-key";
+  readonly credentialKind: "oauth" | "api-key" | "web-session";
   readonly tierRanking: TierRanking;
   readonly features: ProviderFeatures;
 

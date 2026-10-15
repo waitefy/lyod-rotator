@@ -1,0 +1,168 @@
+name: Argon upstream sync
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Stable upstream tag; empty selects the latest stable release'
+        type: string
+        default: ''
+      publish:
+        description: 'Push the prepared update branch and open a draft PR'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: argon-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.repository != 'tuxevil/tuxevil-rotator' &&
+      (github.event_name == 'workflow_dispatch' || vars.ARGON_UPSTREAM_SYNC_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      commit: ${{ steps.existing.outputs.commit || steps.publish.outputs.commit }}
+      branch: ${{ steps.plan.outputs.branch }}
+      tag: ${{ steps.plan.outputs.tag }}
+      upstream-commit: ${{ steps.plan.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Discover stable upstream release without modifying the checkout
+        id: plan
+        env:
+          REQUESTED_RELEASE: ${{ inputs.release }}
+        run: |
+          args=(--report "$RUNNER_TEMP/argon-sync-plan.json")
+          if [[ -n "$REQUESTED_RELEASE" ]]; then
+            args+=(--release "$REQUESTED_RELEASE")
+          fi
+          node scripts/sync-upstream.mjs "${args[@]}"
+
+      - name: Preserve an existing update branch
+        id: existing
+        if: steps.plan.outputs.status == 'available' && (github.event_name == 'schedule' || inputs.publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/$SYNC_BRANCH" > "$RUNNER_TEMP/argon-sync-refs.json"
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const refs = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/argon-sync-refs.json`, 'utf8'));
+          const existing = refs.find(ref => ref.ref === `refs/heads/${process.env.SYNC_BRANCH}`);
+          if (existing) {
+            if (!/^[a-f0-9]{40}$/.test(existing.object.sha)) throw new Error('Invalid branch commit');
+            appendFileSync(process.env.GITHUB_OUTPUT, `commit=${existing.object.sha}\n`);
+          }
+          JS
+
+      - name: Prepare merge in an isolated copy
+        id: merge
+        if: >-
+          steps.plan.outputs.status == 'available' && steps.existing.outputs.commit == '' &&
+          (github.event_name == 'schedule' || inputs.publish)
+        env:
+          UPSTREAM_TAG: ${{ steps.plan.outputs.tag }}
+          UPSTREAM_COMMIT: ${{ steps.plan.outputs.commit }}
+        run: >-
+          node scripts/sync-upstream.mjs --release "$UPSTREAM_TAG" --expected-commit "$UPSTREAM_COMMIT"
+          --output "$RUNNER_TEMP/argon-upstream" --report "$RUNNER_TEMP/argon-sync-result.json"
+
+      - name: Push prepared update without overwriting existing work
+        id: publish
+        if: steps.merge.outputs.status == 'prepared'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          SYNC_BRANCH: ${{ steps.plan.outputs.branch }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::UPSTREAM_SYNC_TOKEN needs Contents, Pull requests and Workflows write permissions for this fork.'
+            exit 1
+          fi
+          gh auth setup-git --hostname github.com
+          git -C "$RUNNER_TEMP/argon-upstream" switch -c "$SYNC_BRANCH"
+          git -C "$RUNNER_TEMP/argon-upstream" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+            -c user.name='Rotator upstream sync' -c user.email='rotator-sync@users.noreply.github.com' \
+            commit -m "Merge upstream $UPSTREAM_TAG into Argon fork"
+          git -C "$RUNNER_TEMP/argon-upstream" remote set-url origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C "$RUNNER_TEMP/argon-upstream" push origin "HEAD:refs/heads/$SYNC_BRANCH"
+          printf 'commit=%s\n' "$(git -C "$RUNNER_TEMP/argon-upstream" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Save merge diagnostics
+        if: always()
+        run: |
+          if [[ -d "$RUNNER_TEMP/argon-upstream/.git" ]]; then
+            git -C "$RUNNER_TEMP/argon-upstream" diff --binary HEAD > "$RUNNER_TEMP/argon-sync.patch"
+          fi
+          if [[ -f "$RUNNER_TEMP/argon-sync-plan.json" ]]; then
+            cat "$RUNNER_TEMP/argon-sync-plan.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f "$RUNNER_TEMP/argon-sync-result.json" ]]; then
+            cat "$RUNNER_TEMP/argon-sync-result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-sync-report
+          path: |
+            ${{ runner.temp }}/argon-sync-plan.json
+            ${{ runner.temp }}/argon-sync-result.json
+            ${{ runner.temp }}/argon-sync.patch
+          retention-days: 14
+
+  checks:
+    needs: prepare
+    if: needs.prepare.outputs.commit != ''
+    uses: ./.github/workflows/argon-ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.commit }}
+      upstream-commit: ${{ needs.prepare.outputs.upstream-commit }}
+
+  pull-request:
+    needs: [prepare, checks]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.commit != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open a draft PR for review and live Gemini testing
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          SYNC_BRANCH: ${{ needs.prepare.outputs.branch }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.tag }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [[ -n "$existing" ]]; then
+            printf '%s\n' "$existing" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/argon-sync-pr.md" <<EOF
+          Merge stable upstream release $UPSTREAM_TAG while preserving Gemini Web changes.
+
+          Package and lockfile versions and fork-base.json are updated together. The upstream commit remains in merge ancestry.
+
+          Checks: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          This PR stays a draft pending review and a live Gemini session test. It does not promote an image or deploy production.
+          EOF
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head "$SYNC_BRANCH" --draft \
+            --title "Sync upstream $UPSTREAM_TAG" --body-file "$RUNNER_TEMP/argon-sync-pr.md"

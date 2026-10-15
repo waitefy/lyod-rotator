@@ -1,3 +1,6 @@
+import { StringDecoder } from "node:string_decoder";
+import { webCapabilityError } from "./providers/gemini-web/forward.js";
+import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER } from "./providers/gemini-web/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import {
@@ -515,7 +518,7 @@ export function parseOpenAiJson(raw: string): CompatCompletion {
   };
 }
 
-export function parseAntigravitySse(raw: string): CompatCompletion {
+export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: boolean } = {}): CompatCompletion {
   let text = "";
   let thinkingText = "";
   let inputTokens = 0;
@@ -611,7 +614,7 @@ export function parseAntigravitySse(raw: string): CompatCompletion {
   // Intercept legacy hallucinated format: [Tool call: name(args)]
   const legacyRegex = /\[Tool call:\s*([a-zA-Z0-9_-]+)\(([\s\S]*?)\)\]/g;
   let match;
-  while ((match = legacyRegex.exec(parsedText)) !== null) {
+  while (options.allowLegacyTools !== false && (match = legacyRegex.exec(parsedText)) !== null) {
     const name = match[1];
     const args = match[2].trim();
     const callId = `call_${Date.now().toString(36)}_${toolCallIndex++}`;
@@ -621,11 +624,11 @@ export function parseAntigravitySse(raw: string): CompatCompletion {
       function: { name, arguments: args },
     });
   }
-  parsedText = parsedText.replace(legacyRegex, "");
+  if (options.allowLegacyTools !== false) parsedText = parsedText.replace(legacyRegex, "");
 
   // Intercept new hallucinated XML format: <tool_call name="name">args</tool_call>
   const xmlRegex = /<tool_call name="([^"]+)">([\s\S]*?)<\/tool_call>/g;
-  while ((match = xmlRegex.exec(parsedText)) !== null) {
+  while (options.allowLegacyTools !== false && (match = xmlRegex.exec(parsedText)) !== null) {
     const name = match[1];
     const args = match[2].trim();
     const callId = `call_${Date.now().toString(36)}_${toolCallIndex++}`;
@@ -635,7 +638,7 @@ export function parseAntigravitySse(raw: string): CompatCompletion {
       function: { name, arguments: args },
     });
   }
-  parsedText = parsedText.replace(xmlRegex, "");
+  if (options.allowLegacyTools !== false) parsedText = parsedText.replace(xmlRegex, "");
 
   parsedText = parsedText.trim();
 
@@ -1157,6 +1160,7 @@ export async function streamCompatSse(
     if (!nodeStream.destroyed) nodeStream.destroy(error);
   }, options.idleTimeoutMs);
 
+  const streamDecoder = new StringDecoder("utf8");
   try {
     for await (const chunk of nodeStream) {
       if (reqClosed) {
@@ -1164,7 +1168,7 @@ export async function streamCompatSse(
       }
       idleGuard.reset();
       if (firstByteMs === undefined) firstByteMs = Date.now() - streamStartMs;
-      const str = chunk.toString();
+      const str = typeof chunk === "string" ? chunk : streamDecoder.write(chunk);
       tailBuffer += str;
       let newlineIdx;
       while ((newlineIdx = tailBuffer.indexOf("\n")) >= 0) {
@@ -1339,6 +1343,7 @@ export async function streamCompatSse(
       }
       await waitForResponseDrain(res, options.backpressureTimeoutMs);
     }
+    tailBuffer += streamDecoder.end();
   } catch (err) {
     if (!reqClosed) {
       streamError ??= redactSensitive(String(err)).slice(0, 200);
@@ -1939,6 +1944,7 @@ export async function streamResponsesSse(
       // Ignore malformed NDJSON lines
     }
   };
+  const streamDecoder = new StringDecoder("utf8");
   try {
     for await (const chunk of nodeStream) {
       if (reqClosed) {
@@ -1946,7 +1952,7 @@ export async function streamResponsesSse(
       }
       idleGuard.reset();
       if (firstByteMs === undefined) firstByteMs = Date.now() - streamStartMs;
-      tailBuffer += chunk.toString();
+      tailBuffer += typeof chunk === "string" ? chunk : streamDecoder.write(chunk);
       let newlineIdx;
       while ((newlineIdx = tailBuffer.indexOf("\n")) >= 0) {
         const line = tailBuffer.slice(0, newlineIdx).trim();
@@ -2149,6 +2155,7 @@ export async function streamResponsesSse(
       }
       await waitForResponseDrain(res, options.backpressureTimeoutMs);
     }
+    tailBuffer += streamDecoder.end();
   } catch (err) {
     if (!reqClosed) {
       streamError ??= redactSensitive(String(err)).slice(0, 200);
@@ -2394,7 +2401,7 @@ async function completeViaRotator(
             ? parseOpenAiJson(raw)
             : format === "ollama"
               ? parseOllamaNdjson(raw)
-              : parseAntigravitySse(raw);
+              : parseAntigravitySse(raw, { allowLegacyTools: context.providerId !== GEMINI_WEB_PROVIDER });
           if (completion.inputTokens > 0 || completion.outputTokens > 0) {
             rotator.recordTokenUsage(
               context.displayModelKey,
@@ -2713,6 +2720,18 @@ export function buildOpenAIModelCatalog(
       });
     }
   }
+  for (const model of GEMINI_WEB_MODELS) {
+    if (!hasActiveProvider(GEMINI_WEB_PROVIDER) || !served(GEMINI_WEB_PROVIDER)(model)) continue;
+    catalog.push({
+      id: model, object: "model", created: 0, owned_by: GEMINI_WEB_PROVIDER,
+      context_window: GEMINI_WEB_CONTEXT, max_model_len: GEMINI_WEB_CONTEXT,
+      meta: {
+        context_length: GEMINI_WEB_CONTEXT, family: "gemini-web", provider: GEMINI_WEB_PROVIDER,
+        multimodal: false, tool_calling: false, streaming: true, limited_web: true,
+        usage_unavailable: true, system_prompt: "text-emulated", max_prompt_bytes: 48000,
+      },
+    });
+  }
   return dedupeByRoute(catalog, source);
 }
 
@@ -2986,6 +3005,12 @@ export async function handleOpenAIChatCompletions(
     ? { off: false, providerId: autoSelection.providerId, pinned: true }
     : compatRoute(rotator, requestedModel);
   if (route.off) return openAIModelOff(res, requestedModel);
+  if (route.providerId === GEMINI_WEB_PROVIDER) {
+    res.setHeader("X-Rotator-Usage", "unavailable");
+    res.setHeader("X-Rotator-Provider-Mode", "limited-web");
+    const message = webCapabilityError(parsed);
+    if (message) return writeJson(res, 400, { error: { type: "invalid_request_error", message } });
+  }
   const routedRequest = autoSelection
     ? { ...validation.value, model: autoSelection.model }
     : { ...validation.value, model: route.modelId ?? requestedModel };
@@ -3120,7 +3145,7 @@ export async function handleOpenAIChatCompletions(
               : "stop",
       },
     ],
-    usage: {
+    usage: route.providerId === GEMINI_WEB_PROVIDER ? null : {
       prompt_tokens: result.completion.inputTokens,
       completion_tokens: result.completion.outputTokens,
       total_tokens:
@@ -3182,6 +3207,12 @@ export async function handleOpenAIResponsesCreate(
     ? { off: false, providerId: autoSelection.providerId, pinned: true }
     : compatRoute(rotator, requestedModel);
   if (route.off) return openAIModelOff(res, requestedModel);
+  if (route.providerId === GEMINI_WEB_PROVIDER) {
+    res.setHeader("X-Rotator-Usage", "unavailable");
+    res.setHeader("X-Rotator-Provider-Mode", "limited-web");
+    const message = webCapabilityError(parsed);
+    if (message) return writeJson(res, 400, { error: { type: "invalid_request_error", message } });
+  }
   const routedValidation = autoSelection
     ? { ...validation.value, model: autoSelection.model }
     : { ...validation.value, model: route.modelId ?? requestedModel };
@@ -3501,6 +3532,12 @@ export async function handleAnthropicMessages(
       error: { type: "not_found_error", message: modelOffMessage(requestedModel) },
     });
   if (route.off) return anthropicModelOff();
+  if (route.providerId === GEMINI_WEB_PROVIDER) {
+    res.setHeader("X-Rotator-Usage", "unavailable");
+    res.setHeader("X-Rotator-Provider-Mode", "limited-web");
+    const message = webCapabilityError(parsed);
+    if (message) return writeJson(res, 400, { type: "error", error: { type: "invalid_request_error", message } });
+  }
   const routedValidation = autoSelection
     ? { ...validation.value, model: autoSelection.model }
     : { ...validation.value, model: route.modelId ?? requestedModel };

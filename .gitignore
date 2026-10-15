@@ -41,3 +41,8 @@ ollama-debug-last.json
 .pi/
 pnpm-lock.yaml
 pnpm-workspace.yaml
+
+.venv-gemini-web/
+__pycache__/
+*.pyc
+.gemini-web-cache/

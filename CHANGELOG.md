@@ -1,3 +1,28 @@
+## [4.2.0-argon.1] — local fork
+
+- Raise the Gemini Web prompt budget from 48,000 UTF-8 bytes to 4 MiB and the client context estimate to 262,144 tokens. Size the internal JSON channel for escaping expansion; preserve large Unicode tool results and keep an explicit byte limit.
+
+- Bridge foreground OMP `bash` commands alongside the five file tools. Preserve command output and failure status; execute under the client permissions. Reject background, interactive and named service requests.
+
+- Add a local OMP extension that selects the supported file tools for Argon during normal launches and restores the former tool set and thinking level when leaving Argon. Respect explicitly restricted tool sets.
+
+- Bridge OMP `edit` and `write` using their original schemas and patch text. Preserve client-side snapshot validation, tool errors and post-edit reads; leave execution and approval with the client.
+
+- Extend the experimental client tool bridge to OMP `glob` and `grep` alongside `read`, with per-tool schema validation, nullable arguments and sequential search/read history. Keep execution on the API client.
+
+- Publish three Gemini Web Argon models: `gemini-4-argon-web-low`, `-medium`, and `-high`, with fixed web thinking levels (1, 4, 2). Keep the former id as an unlisted Low alias. Check both wire selectors, cancellation cleanup, model routing and fixed-level behavior; verify real Google generation at all three levels.
+
+- Add the optional `gemini-web` provider with strict discovery of available Gemini 4 Argon, text history, streaming, cancellation and one request per session.
+- Keep cookies in a private file and refresh cache, outside account JSON and request headers. Pin the unofficial Python web client to a source revision.
+- Reject unsupported tools/media/structured output; publish limited capabilities and unavailable usage in the model catalog.
+- Isolate browser-session errors from other account credentials. Add mock worker, routing and protocol tests, setup documentation and a separate Dockerfile.
+- Preserve the deployed UTF-8 stream decoder, public-host logging and disabled-model diagnostic fixes.
+- Verify real Argon generation through the worker and OpenAI Chat Completions locally and in a server smoke container. Treat guest sessions after cookie expiry as provider-scoped authentication errors.
+- Wait up to 60 seconds for a busy browser session instead of immediately rejecting overlapping client requests with HTTP 409. Preserve cancellation and exclusive upstream access.
+- Add dedicated Firefox login and automatic SSH session installation with rollback on failed verification. Keep one persistent Gemini client per account, refresh cookies in the background and restore the cache after restarts. Check session health on startup and reconnect existing accounts without restarting the rotator.
+- Detect Google email and stable account ID automatically in `rotator-gemini-login`. Isolate login profiles and session files, add new accounts or reconnect existing ones without flags, and preserve legacy account identifiers through a private identity index.
+- Prototype an experimental OpenAI Chat Completions `read` tool bridge with per-request framing, argument validation, client-side execution and full text results. Keep other tools unsupported. The user confirmed a real OMP read tool round-trip against package.json.
+
 # Changelog
 
 ## [Unreleased]

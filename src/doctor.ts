@@ -27,6 +27,7 @@ export interface DoctorResult {
 
 export async function runDoctor(
   env: NodeJS.ProcessEnv = process.env,
+  options: { geminiWebProbe?: boolean } = {},
 ): Promise<DoctorResult> {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -77,6 +78,14 @@ export async function runDoctor(
 
   const backups = dbConfigured ? [] : await listBackups();
 
+  const { diagnoseGeminiWeb } = await import("./providers/gemini-web/diagnostics.js");
+  const geminiWeb = await diagnoseGeminiWeb(cfg?.accounts ?? [], { probe: options.geminiWebProbe });
+  for (const check of geminiWeb.checks) {
+    if (check.severity === "error") {
+      errors.push(`Gemini Web [${check.code}]${check.account ? ` (${check.account})` : ""}: ${check.message}${check.action ? ` ${check.action}` : ""}`);
+    }
+  }
+
   return {
     ok: errors.length === 0,
     warnings,
@@ -88,6 +97,7 @@ export async function runDoctor(
       adminTokenConfigured: !!getConfiguredAdminToken(env),
       bindHost: env.TUXEVIL_ROTATOR_BIND_HOST ?? env.PI_ROTATOR_BIND_HOST ?? null,
       storageBackend: dbConfigured ? "postgresql" : "file",
+      ...(geminiWeb.accountCount || options.geminiWebProbe ? { geminiWeb } : {}),
     },
   };
 }

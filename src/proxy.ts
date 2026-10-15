@@ -345,6 +345,7 @@ export type UpstreamAction =
       errorText: string;
       endpoint: string;
     }
+  | { kind: "web-error"; httpStatus: number; errorText: string; endpoint: string }
   | { kind: "flagged-401"; errorText: string; endpoint: string }
   | { kind: "flagged-403"; errorText: string; endpoint: string }
   | { kind: "forbidden"; errorText: string; endpoint: string }
@@ -372,6 +373,10 @@ export async function classifyUpstreamResponse(
   modelKey: string,
   providerId = DEFAULT_PROVIDER,
 ): Promise<UpstreamAction> {
+  if (providerId === "gemini-web" && !response.ok && response.status !== 429) {
+    return { kind: "web-error", httpStatus: response.status,
+      errorText: await response.text().catch(() => ""), endpoint };
+  }
   if (response.status === 429) {
     const errorText = await response.text().catch(() => "");
     const rateLimitReason = classifyRateLimitReason(errorText, response.status);
@@ -553,6 +558,17 @@ async function handleUpstreamAccountAction(
     writeLog,
     recordFailureAttempt,
   } = options;
+
+  // A browser session failure must never flag the parent account or its OAuth credentials.
+  if (action.kind === "web-error") {
+    if (action.httpStatus === 401) {
+      rotator.markProviderInvalid(account, "gemini-web", "Gemini Web session requires reconnection");
+    } else if (action.httpStatus === 403) {
+      rotator.setProviderCooldown(account, "gemini-web", 60_000);
+    }
+    logRequestEnd(action.httpStatus, `endpoint=${action.endpoint}`);
+    return buildFailureDecision(options, action.httpStatus, action.errorText);
+  }
 
   if (
     provider.id === "openai-codex" &&
@@ -1106,14 +1122,15 @@ export async function benchmarkAccount(
     }
 
     const usage = benchmarkSpec.parseUsage(raw);
-    const outputTokens = usage?.outputTokens ?? Math.max(1, Math.ceil(raw.length / 4));
+    const outputTokens = benchmarkProvider.id === "gemini-web"
+      ? null : usage?.outputTokens ?? Math.max(1, Math.ceil(raw.length / 4));
     return {
       account: label,
       status: "success",
       latencyMs,
       ttfbMs,
       outputTokens,
-      tokensPerSecond: outputTokens / Math.max(latencyMs / 1000, 0.001),
+      tokensPerSecond: outputTokens === null ? null : outputTokens / Math.max(latencyMs / 1000, 0.001),
     };
   } catch (err) {
     return benchmarkFailure(account, startedAt, formatError(err), ttfbMs);
@@ -2959,11 +2976,12 @@ export function startProxy(
     closeAllAudioWebSockets(serverClosing.signal);
   });
 
+    const publicHost = process.env.TUXEVIL_ROTATOR_PUBLIC_HOST || process.env.ROTATOR_PUBLIC_HOST || (bindHost === "0.0.0.0" || bindHost === "::" ? "rotator.lyod.online" : bindHost);
   server.listen(port, bindHost, () => {
     log(`Listening on ${bindHost}:${port}`, rotator);
-    log(`Dashboard: http://localhost:${port}/dashboard`, rotator);
+    log(`Dashboard: http://${publicHost}/dashboard (direct: http://${publicHost}:${port}/dashboard)`, rotator);
     log(`Audio Stream WS: ws://localhost:${port}/ws`, rotator);
-    log(`Hosted login: http://localhost:${port}/login`, rotator);
+    log(`Hosted login: http://${publicHost}/login (direct: http://${publicHost}:${port}/login)`, rotator);
   });
   return server;
 }

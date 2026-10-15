@@ -7,6 +7,8 @@ export const DEFAULT_PROVIDER = "google-antigravity";
 export interface CredentialEntry {
   provider: string;
   apiKey?: string;
+  /** Absolute path to a private Gemini App cookie JSON; cookie values stay outside config. */
+  cookiesFile?: string;
   refreshToken?: string;
   projectId?: string;
   providerAccountId?: string;
@@ -95,6 +97,7 @@ export const PROVIDER_ORDER: string[] = [
   "ollama",
   "opencode-zen",
   "openai-codex",
+  "gemini-web",
 ];
 
 export const PROVIDER_ORDER_RANK: Record<string, number> = {
@@ -102,6 +105,7 @@ export const PROVIDER_ORDER_RANK: Record<string, number> = {
   ollama: 2,
   "opencode-zen": 3,
   "openai-codex": 4,
+  "gemini-web": 5,
 };
 
 // Ollama Cloud currently exposes one account-wide usage pool. Keep the old

@@ -16,6 +16,7 @@ import {
   isThinkingModel,
 } from "../../compat/model-specs.js";
 import { dynamicCatalog } from "./dynamic-catalog.js";
+import { getWebThinkingLevel } from "../gemini-web/credentials.js";
 import {
   thoughtSignatureCache,
   getStoredResponse,
@@ -1050,6 +1051,7 @@ export function openAIToAntigravityBody(
 
       const hasMissingSig =
         isGeminiThinking &&
+        getWebThinkingLevel(requestedModel) === undefined &&
         Array.isArray(msgToolCalls) &&
         msgToolCalls.length > 0 &&
         !thoughtSignatureCache.has(msgToolCalls[0].id);

@@ -4300,7 +4300,16 @@ export class AccountRotator {
       }
     }
     const routingDiagnostics: Record<string, RoutingModelDiagnostics> = {};
+    const diagnosticCatalog = this.getModelCatalog();
     for (const modelKey of knownModels) {
+      const providerId = getProviderIdForPoolKey(modelKey);
+      const catalogModel = modelKey.startsWith(`${providerId}:`)
+        ? modelKey.slice(providerId.length + 1) : modelKey;
+      if (isProviderModelOff(this, providerId, catalogModel)) continue;
+      const poolModels = diagnosticCatalog.filter(
+        (model) => model.providerId === providerId && model.quotaPool === modelKey,
+      );
+      if (poolModels.length > 0 && poolModels.every((model) => model.offReason !== null)) continue;
       routingDiagnostics[modelKey] = this.buildRoutingDiagnostics(
         modelKey,
         now,
@@ -4546,6 +4555,9 @@ export class AccountRotator {
     const receivesCodexCredential = accountConfig.credentials?.some(
       (credential) => credential.provider === "openai-codex",
     );
+    const receivesWebCredential = accountConfig.credentials?.some(
+      (credential) => credential.provider === "gemini-web",
+    );
     const existingIndex = this.accounts.findIndex(
       (account) => account.config.email === accountConfig.email,
     );
@@ -4576,6 +4588,10 @@ export class AccountRotator {
             delete existing.providerTokens;
           }
         }
+      }
+      if (receivesWebCredential) {
+        if (existing.invalidProviders) delete existing.invalidProviders["gemini-web"];
+        if (existing.providerCooldowns) delete existing.providerCooldowns["gemini-web"];
       }
       this.config.accounts[existingIndex] = existing.config;
       this.log(`${accountConfig.email}: account updated via hosted login`);
