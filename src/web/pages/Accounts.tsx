@@ -358,10 +358,10 @@ const AccountRow = memo(function AccountRow({
         ) : (
           <div class="mini-pools">
             {pools.slice(0, 3).map((q) => (
-              <div key={q.modelKey} class="mini-pool" title={`${q.displayName}: ${q.percentRemaining}% left`}>
+              <div key={q.modelKey} class="mini-pool" title={`${q.displayName}: ${Math.trunc(q.percentRemaining)}% left`}>
                 <span class="mini-pool-name">{q.displayName}</span>
                 <Meter value={q.percentRemaining} label={`${q.displayName} quota`} size="sm" />
-                <span class="num">{q.percentRemaining}%</span>
+                <span class="num">{Math.trunc(q.percentRemaining)}%</span>
               </div>
             ))}
             {pools.length > 3 && <span class="cell-sub">+{pools.length - 3} more</span>}
@@ -548,10 +548,10 @@ function CardQuota({ account, quota, inactive }: { account: DashboardAccount; qu
     when = <span>—</span>;
   }
   return (
-    <li class="card-quota" title={`${quota.displayName}: ${quota.percentRemaining}% left · ${TIMER_LABELS[quota.timerType] ?? quota.timerType}`}>
+    <li class="card-quota" title={`${quota.displayName}: ${Math.trunc(quota.percentRemaining)}% left · ${TIMER_LABELS[quota.timerType] ?? quota.timerType}`}>
       <span class="card-quota-name">{quota.displayName}</span>
       <Meter value={quota.percentRemaining} label={`${quota.displayName} quota`} />
-      <span class="card-quota-pct num">{quota.percentRemaining}%</span>
+      <span class="card-quota-pct num">{Math.trunc(quota.percentRemaining)}%</span>
       <span class="card-quota-when">{when}</span>
     </li>
   );

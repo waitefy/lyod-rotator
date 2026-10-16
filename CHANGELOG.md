@@ -1,3 +1,7 @@
+## [4.2.0-argon.5]
+
+- Display account quota percentages as integers, truncating fractional digits in quota rows, cards and tooltips.
+
 ## [4.2.0-argon.4]
 
 - Show one Gemini App quota pool, constrained by both the 5-hour and weekly windows, like Codex.

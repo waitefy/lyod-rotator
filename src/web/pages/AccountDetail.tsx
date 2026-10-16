@@ -253,7 +253,7 @@ function QuotaRow({ account, quota, inactive }: { account: DashboardAccount; quo
     <li class="quota-item">
       <div class="quota-head">
         <span class="quota-name">{quota.displayName}</span>
-        <span class="num quota-pct">{quota.percentRemaining}%</span>
+        <span class="num quota-pct">{Math.trunc(quota.percentRemaining)}%</span>
       </div>
       <Meter value={quota.percentRemaining} label={`${quota.displayName} quota remaining`} />
       {quota.credits && (
