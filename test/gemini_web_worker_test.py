@@ -245,16 +245,33 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("private-cookie", caught.exception.message)
 
     def test_transport_restores_on_cancellation_but_never_resurrects_closed_client(self):
-        original = SimpleNamespace(cookies={"fixture": "cookie"})
+        original = SimpleNamespace(cookies={"fixture": "cookie"}, stream=lambda *args, **kwargs: None)
         client = SimpleNamespace(client=original)
         with self.assertRaises(asyncio.CancelledError):
             with worker.thinking_transport(client, "medium"):
+                self.assertIs(client.client, original)
                 self.assertIs(client.client.cookies, original.cookies)
                 raise asyncio.CancelledError()
         self.assertIs(client.client, original)
         with worker.thinking_transport(client, "high"):
             client.client = None
         self.assertIsNone(client.client)
+
+    def test_thinking_adapter_preserves_upload_client_type_and_stream_method(self):
+        class TypedTransport:
+            def stream(self, method, url, **kwargs):
+                return method, url, kwargs
+        original = TypedTransport()
+        stream = original.stream
+        client = SimpleNamespace(client=original)
+        with worker.thinking_transport(client, "medium"):
+            # The pinned upload_file's validate_call requires an AsyncSession,
+            # so a proxy object breaks uploads before any HTTP request is sent.
+            self.assertIsInstance(client.client, TypedTransport)
+            self.assertIs(client.client, original)
+            self.assertEqual(client.client.stream("POST", "https://content-push.googleapis.com/upload"),
+                             ("POST", "https://content-push.googleapis.com/upload", {}))
+        self.assertEqual(original.stream, stream)
 
     def test_unknown_level_rejected_before_client_initialization(self):
         for value in ("ultra", 3, []):

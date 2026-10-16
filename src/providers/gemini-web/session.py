@@ -13,6 +13,10 @@ import tempfile
 
 import worker
 
+# Leave time for cleanup before the stdio worker's 480-second watchdog fires.
+SESSION_REQUEST_TIMEOUT_SECONDS = 450
+CLIENT_CLOSE_TIMEOUT_SECONDS = 5
+
 
 def session_paths(payload):
     value = payload.get("cookiesFile")
@@ -60,7 +64,7 @@ class Session:
     async def close_client(self):
         if self.client is not None:
             try:
-                await self.client.close()
+                await asyncio.wait_for(self.client.close(), CLIENT_CLOSE_TIMEOUT_SECONDS)
             finally:
                 self.client = None
 
@@ -76,10 +80,12 @@ class Session:
     async def execute(self, payload, send):
         if payload.get("cookiesFile") != self.payload.get("cookiesFile") or payload.get("proxy") != self.payload.get("proxy"):
             raise worker.WorkerError(400, "Gemini Web session settings changed; reconnect the session")
+        deadline = asyncio.get_running_loop().time() + SESSION_REQUEST_TIMEOUT_SECONDS
         try:
             await asyncio.wait_for(self.lock.acquire(), worker.SESSION_LOCK_WAIT_SECONDS)
         except TimeoutError:
             raise worker.WorkerError(409, "Gemini Web session remained busy for 60 seconds; retry the request") from None
+        generation = None
         try:
             try:
                 fingerprint = hashlib.sha256(self.cookies.read_bytes()).digest()
@@ -95,13 +101,27 @@ class Session:
                     completed.append(event)
                 else:
                     send(event)
-            await worker.run(payload, self.factory, keep_open=True, emit_event=emit)
+            generation = asyncio.create_task(
+                worker.run(payload, self.factory, keep_open=True, emit_event=emit)
+            )
+            finished, _ = await asyncio.wait(
+                {generation}, timeout=max(0, deadline - asyncio.get_running_loop().time())
+            )
+            if not finished:
+                raise TimeoutError()
+            await generation
             self.persist()
             for event in completed:
                 send(event)
         except BaseException:
+            if generation is not None and not generation.done():
+                generation.cancel()
+            # Stream cleanup can wait for the HTTP transport to close. Do not
+            # await the cancelled generation before closing that transport.
             with contextlib.suppress(Exception):
                 await self.close_client()
+            if generation is not None:
+                await asyncio.gather(generation, return_exceptions=True)
             raise
         finally:
             self.lock.release()
@@ -176,7 +196,7 @@ async def request(payload):
     launched = False
     for _ in range(100):
         try:
-            reader, writer = await asyncio.open_unix_connection(socket, limit=worker.MAX_OUTPUT_CHARS * 6 + 4096)
+            reader, writer = await asyncio.open_unix_connection(socket, limit=worker.MAX_OUTPUT_EVENT_BYTES)
             break
         except (FileNotFoundError, ConnectionRefusedError):
             if not launched:

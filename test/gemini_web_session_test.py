@@ -1,5 +1,6 @@
 """Persistent session and disconnect tests; no Google requests or real credentials."""
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -11,6 +12,7 @@ import time
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src/providers/gemini-web"))
 import session
@@ -117,11 +119,154 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
             server.close()
             await server.wait_closed()
 
+    async def test_image_event_larger_than_the_text_limit_crosses_the_broker_client(self):
+        path = Path(self.temp.name) / "image.sock"
+        raw_image = b"\x89PNG\r\n\x1a\n" + b"x" * 1024 * 1024
+        event = {"type": "image", "mimeType": "image/png", "data": base64.b64encode(raw_image).decode()}
+        async def handle(reader, writer):
+            await reader.readline()
+            writer.write((json.dumps(event) + '\n{"type":"done"}\n').encode())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        server = await asyncio.start_unix_server(handle, path=str(path))
+        events = []
+        try:
+            with patch.object(session, "session_paths", return_value=(None, None, path)), patch.object(session.worker, "emit", events.append):
+                await asyncio.wait_for(session.request({**self.payload, "output": "image"}), 5)
+            self.assertEqual(events, [event, {"type": "done"}])
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_done_is_emitted_after_persistence(self):
         order = []
         self.session.save = lambda client: order.append("save")
         await self.session.execute(self.payload, lambda event: order.append(event["type"]))
         self.assertEqual(order, ["ready", "delta", "save", "done"])
+
+    async def test_request_deadline_releases_session_and_next_request_recovers(self):
+        started = asyncio.Event()
+        class Stalled(Client):
+            async def generate_content_stream(self, *args, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+                yield
+        self.session.client_factory = lambda *args, **kwargs: Stalled([model("argon")], [])
+        with patch.object(session, "SESSION_REQUEST_TIMEOUT_SECONDS", .03, create=True):
+            task = asyncio.create_task(self.session.execute(self.payload, lambda event: None))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                completed, _ = await asyncio.wait({task}, timeout=.3)
+                self.assertIn(task, completed, "request exceeded its total session deadline")
+                with self.assertRaises(TimeoutError):
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertFalse(self.session.lock.locked())
+        self.assertIsNone(self.session.client)
+        self.session.client_factory = lambda *args, **kwargs: Client([model("argon")], ["recovered"])
+        events = []
+        await self.session.execute(self.payload, events.append)
+        self.assertEqual([e.get("text") for e in events if e["type"] == "delta"], ["recovered"])
+
+    async def test_cancelled_request_does_not_hold_lock_during_stalled_close(self):
+        started, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        class Stalled(Client):
+            async def generate_content_stream(self, *args, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+                yield
+
+            async def close(self):
+                closing.set()
+                await release.wait()
+                self.closed = True
+        self.session.client_factory = lambda *args, **kwargs: Stalled([model("argon")], [])
+        with patch.object(session, "CLIENT_CLOSE_TIMEOUT_SECONDS", .03, create=True):
+            task = asyncio.create_task(self.session.execute(self.payload, lambda event: None))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                task.cancel()
+                await asyncio.wait_for(closing.wait(), 1)
+                completed, _ = await asyncio.wait({task}, timeout=.3)
+                self.assertIn(task, completed, "cancelled request is stuck closing the client")
+                self.assertTrue(task.cancelled())
+                self.assertFalse(self.session.lock.locked())
+                self.assertIsNone(self.session.client)
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_cancelled_and_timed_out_waiters_leave_active_generation_running(self):
+        started = asyncio.Event()
+        class Stalled(Client):
+            async def generate_content_stream(self, *args, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+                yield
+        client = Stalled([model("argon")], [])
+        self.session.client_factory = lambda *args, **kwargs: client
+        active = asyncio.create_task(self.session.execute(self.payload, lambda event: None))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            waiting = asyncio.create_task(self.session.execute(self.payload, lambda event: None))
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiting
+            with patch.object(session.worker, "SESSION_LOCK_WAIT_SECONDS", .03):
+                with self.assertRaises(session.worker.WorkerError) as caught:
+                    await self.session.execute(self.payload, lambda event: None)
+            self.assertEqual(caught.exception.status, 409)
+            self.assertFalse(active.done())
+            self.assertFalse(client.closed)
+            self.assertTrue(self.session.lock.locked())
+        finally:
+            active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
+        self.assertFalse(self.session.lock.locked())
+        self.assertTrue(client.closed)
+
+    async def test_closes_transport_before_waiting_for_cancelled_stream_cleanup(self):
+        for kind in ("cancel", "deadline"):
+            with self.subTest(kind=kind):
+                started, transport_closed = asyncio.Event(), asyncio.Event()
+                class TransportBlocked(Client):
+                    async def generate_content_stream(self, *args, **kwargs):
+                        started.set()
+                        try:
+                            await asyncio.Event().wait()
+                            yield
+                        finally:
+                            # curl_cffi Response.aclose() waits for the streaming
+                            # request; closing the transport lets it finish.
+                            await transport_closed.wait()
+
+                    async def close(self):
+                        transport_closed.set()
+                        await super().close()
+                client = TransportBlocked([model("argon")], [])
+                self.session.client_factory = lambda *args, **kwargs: client
+                timeout = .03 if kind == "deadline" else 450
+                with patch.object(session, "SESSION_REQUEST_TIMEOUT_SECONDS", timeout):
+                    task = asyncio.create_task(self.session.execute(self.payload, lambda event: None))
+                    try:
+                        await asyncio.wait_for(started.wait(), 1)
+                        if kind == "cancel":
+                            task.cancel()
+                        completed, _ = await asyncio.wait({task}, timeout=.3)
+                        self.assertIn(task, completed, "stream cleanup is waiting for an open transport")
+                        with self.assertRaises(TimeoutError if kind == "deadline" else asyncio.CancelledError):
+                            await task
+                        self.assertTrue(client.closed)
+                        self.assertFalse(self.session.lock.locked())
+                        self.assertIsNone(self.session.client)
+                    finally:
+                        transport_closed.set()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
 
 
 class ProcessTest(unittest.TestCase):

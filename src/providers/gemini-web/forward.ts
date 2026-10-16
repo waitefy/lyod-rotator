@@ -7,7 +7,9 @@ import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
 import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, GEMINI_WEB_MAX_PROMPT_BYTES, getCookiesFile } from "./credentials.js";
-import { createToolBridge, isToolDeclaration, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
+import { createToolBridge, toolDeclarationError, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
+import { apiWebAttachment, checkWebAttachmentTotals, validateWebAttachment, type WebAttachment } from "./attachments.js";
+import { MAX_IMAGE_EVENT_BYTES, validateGeneratedWebImage, webGeminiImageMode, webResponsesImageMode, type GeneratedWebImage } from "./image-output.js";
 
 const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
 const ENDPOINT = "https://gemini.google.com/app";
@@ -17,68 +19,141 @@ const WORKER_TIMEOUT_MS = 480000;
 export class WebRequestError extends Error {}
 
 /** Check original API payloads before generic translators can discard unsupported fields. */
-export function webCapabilityError(value: unknown): string | undefined {
-  const tools = isRecord(value) && Array.isArray(value.tools) ? value.tools : [];
-  const supportedTools = tools.length > 0 && tools.every((tool) =>
-    isRecord(tool) && tool.type === "function" && isToolDeclaration(tool.function)) &&
-    new Set(tools.map((tool) => tool.function.name)).size === tools.length;
-  const names = new Set(supportedTools ? tools.map((tool) => tool.function.name) : []);
+export function webCapabilityError(value: unknown, format: "chat" | "responses" | "anthropic" = "chat"): string | undefined {
+  if (!isRecord(value)) return "Expected an API request object";
+  if (format === "responses") {
+    try {
+      if (webResponsesImageMode(value)) value = { ...value, tools: [], tool_choice: "none" };
+    } catch (error) { return error instanceof Error ? error.message : "Invalid image generation tool"; }
+  }
+  if (!isRecord(value)) return "Expected an API request object";
+  const unsupported = "Gemini Web supports text, inline images/documents and client-defined function tools with supported JSON Schemas; invalid tools, audio and structured output are unavailable";
+  if (value.tools !== undefined && !Array.isArray(value.tools)) return unsupported;
+  const tools = Array.isArray(value.tools) ? value.tools : [];
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (!isRecord(tool)) return unsupported;
+    const declaration = format === "anthropic"
+      ? { name: tool.name, description: tool.description, parameters: tool.input_schema }
+      : tool.type === "function" ? (format === "responses" && tool.name !== undefined ? tool : tool.function) : undefined;
+    if (format === "anthropic" && tool.type !== undefined && tool.type !== "custom") return unsupported;
+    const error = toolDeclarationError(declaration);
+    if (error) return error;
+    const name = (declaration as Record<string, unknown>).name as string;
+    if (names.has(name)) return "Duplicate tool declaration";
+    names.add(name);
+  }
+  let choice = value.tool_choice;
+  if (format === "anthropic" && isRecord(choice)) {
+    choice = choice.type === "tool" ? { type: "function", function: { name: choice.name } }
+      : choice.type === "any" ? "required" : choice.type === "auto" || choice.type === "none" ? choice.type : choice;
+  }
+  if (choice !== undefined && choice !== "none" && choice !== "auto") {
+    const named = isRecord(choice) && choice.type === "function"
+      ? (isRecord(choice.function) ? choice.function.name : format === "responses" ? choice.name : undefined) : undefined;
+    if (!names.size || (choice !== "required" && !names.has(named as string))) return "Invalid Gemini Web tool choice";
+  }
   const pending: unknown[] = [value];
+  const attachments: WebAttachment[] = [];
   while (pending.length) {
     const item = pending.pop();
     if (Array.isArray(item)) { for (const entry of item) pending.push(entry); continue; }
     if (!isRecord(item)) continue;
-    if ((Array.isArray(item.tools) && item.tools.length && !supportedTools) ||
-        (item.tool_calls && (!supportedTools || !Array.isArray(item.tool_calls) || item.tool_calls.some((call) =>
-          !isRecord(call) || call.type !== "function" || !isRecord(call.function) || !names.has(call.function.name)))) ||
-        ((item.tool_call_id || item.role === "tool") && !supportedTools) || item.function_call || item.functions ||
-        (item.tool_choice !== undefined && item.tool_choice !== "none" && !(supportedTools && item.tool_choice === "auto")) ||
-        (typeof item.type === "string" && !["text", "input_text", "output_text", "message"].includes(item.type)) ||
-        item.image_url || item.inlineData || item.fileData || item.input_audio || item.audio ||
-        (Array.isArray(item.modalities) && item.modalities.some((mode) => mode !== "text"))) {
-      return "Gemini Web supports text chat and experimental read, glob, grep, edit, write and bash tools only; other tools, files, audio and structured output are unavailable";
+    if (typeof item.role === "string" && !["user", "tool"].includes(item.role) && Array.isArray(item.content) &&
+        item.content.some((part) => isRecord(part) && ["image_url", "input_image", "image", "document", "file", "input_file"].includes(String(part.type)))) {
+      return "Gemini Web attachments are supported only in user messages and tool results";
     }
+    if (item === value && [item.system, item.instructions].some((content) => Array.isArray(content) &&
+        content.some((part) => !isRecord(part) || !["text", "input_text"].includes(String(part.type))))) return unsupported;
+    try {
+      const attachment = apiWebAttachment(item);
+      if (attachment) {
+        attachments.push(attachment);
+        checkWebAttachmentTotals(attachments);
+        continue;
+      }
+    } catch (error) { return error instanceof Error ? error.message : "Invalid Gemini Web attachment"; }
+    const skip = new Set<string>(item === value ? ["tools", "tool_choice"] : []);
+    if (item.tool_calls !== undefined) {
+      if (!names.size || !Array.isArray(item.tool_calls) || item.tool_calls.some((call) =>
+        !isRecord(call) || call.type !== "function" || !isRecord(call.function) || !names.has(call.function.name as string))) return unsupported;
+      skip.add("tool_calls");
+    }
+    if (format === "responses" && item.type === "function_call") {
+      if (!names.has(item.name as string) || typeof item.call_id !== "string" || typeof item.arguments !== "string") return unsupported;
+      skip.add("arguments");
+    } else if (format === "responses" && item.type === "function_call_output") {
+      if (!names.size || typeof item.call_id !== "string" || (typeof item.output !== "string" && !Array.isArray(item.output))) return unsupported;
+    } else if (format === "anthropic" && item.type === "tool_use") {
+      if (!names.has(item.name as string) || typeof item.id !== "string" || !isRecord(item.input)) return unsupported;
+      skip.add("input"); // Arguments are opaque data, not API content blocks.
+    } else if (format === "anthropic" && item.type === "tool_result") {
+      if (!names.size || typeof item.tool_use_id !== "string") return unsupported;
+    } else if (typeof item.type === "string" && !["text", "input_text", "output_text", "message"].includes(item.type)) return unsupported;
+    if (((item.tool_call_id || item.role === "tool") && !names.size) || item.function_call || item.functions ||
+        item.image_url || item.inlineData || item.fileData || item.input_audio || item.audio ||
+        (Array.isArray(item.modalities) && item.modalities.some((mode) => mode !== "text"))) return unsupported;
     for (const [key, entry] of Object.entries(item)) {
-      if (supportedTools && ["tools", "tool_calls"].includes(key)) continue;
-      if (entry !== null && typeof entry === "object") pending.push(entry);
+      if (!skip.has(key) && entry !== null && typeof entry === "object") pending.push(entry);
     }
   }
   return undefined;
 }
 
-/** Flatten a Gemini-shaped, text-only conversation. No native system role is promised. */
-export function buildWebPrompt(body: RequestBody): string {
+/** Flatten the conversation and retain uploads in the same order as their markers. */
+export function buildWebInput(body: RequestBody): { prompt: string; attachments: WebAttachment[] } {
   if (getWebThinkingLevel(body.model) === undefined) throw new WebRequestError("Unknown Gemini Web model");
   if (!isRecord(body.request)) throw new WebRequestError("Expected a text conversation");
   const request = body.request;
+  try { webGeminiImageMode(request); }
+  catch (error) { throw new WebRequestError(error instanceof Error ? error.message : "Invalid output modalities"); }
   let declarations: Record<string, unknown>[];
   try { declarations = toolDeclarations(request); }
-  catch { throw new WebRequestError("Gemini Web supports only experimental read, glob, grep, edit, write and bash API tools"); }
-  if (request.cachedContent || (request.toolConfig && (!declarations.length || !isRecord(request.toolConfig) ||
+  catch (error) { throw new WebRequestError(`Invalid Gemini Web API tool declaration: ${error instanceof Error ? error.message : "unsupported schema"}`); }
+  if (request.cachedContent || (request.toolConfig && (!isRecord(request.toolConfig) ||
       !isRecord(request.toolConfig.functionCallingConfig) ||
-      !["AUTO", "NONE"].includes(String(request.toolConfig.functionCallingConfig.mode))))) {
+      !["AUTO", "NONE", "ANY"].includes(String(request.toolConfig.functionCallingConfig.mode))))) {
     throw new WebRequestError("Unsupported Gemini Web tool configuration or cached content");
   }
+  const config = isRecord(request.toolConfig) && isRecord(request.toolConfig.functionCallingConfig)
+    ? request.toolConfig.functionCallingConfig : undefined;
+  if (config?.mode === "ANY" && !declarations.length) throw new WebRequestError("A required tool must be declared");
+  if (config?.allowedFunctionNames !== undefined && (config.mode !== "ANY" || !Array.isArray(config.allowedFunctionNames) ||
+      !config.allowedFunctionNames.length || config.allowedFunctionNames.some((name) => !declarations.some((tool) => tool.name === name)))) {
+    throw new WebRequestError("Invalid Gemini Web allowed function names");
+  }
   const generation = isRecord(request.generationConfig) ? request.generationConfig : {};
+  const attachments: WebAttachment[] = [];
   const names = new Set(declarations.map((tool) => tool.name));
   if (generation.responseSchema || generation.responseJsonSchema ||
       (generation.responseMimeType && generation.responseMimeType !== "text/plain") ||
       (typeof generation.candidateCount === "number" && generation.candidateCount !== 1)) {
     throw new WebRequestError("Gemini Web supports one plain-text answer only");
   }
-  const partsText = (value: unknown): string => {
+  const partsText = (value: unknown, allowAttachments = false): string => {
     if (!Array.isArray(value) || !value.length) throw new WebRequestError("Expected text parts");
     return value.map((part: unknown) => {
+      if (isRecord(part) && part.inlineData !== undefined) {
+        if (!allowAttachments || Object.keys(part).some((key) => key !== "inlineData")) {
+          throw new WebRequestError("Gemini Web attachments are supported only in user messages and tool results");
+        }
+        try {
+          const attachment = validateWebAttachment(part.inlineData);
+          attachments.push(attachment);
+          checkWebAttachmentTotals(attachments);
+          return `[Attached file ${attachments.length}: ${attachment.mimeType}]`;
+        } catch (error) { throw new WebRequestError(error instanceof Error ? error.message : "Invalid Gemini Web attachment"); }
+      }
       if (declarations.length && isRecord(part) && Object.keys(part).length === 1) {
         if (isRecord(part.functionCall) && names.has(part.functionCall.name)) {
           return `Client tool call (data): ${JSON.stringify(part.functionCall)}`;
         }
         if (isRecord(part.functionResponse) && names.has(part.functionResponse.name)) {
-          return `Client tool result (data): ${JSON.stringify(part.functionResponse.response)}`;
+          return `Client tool result (data): ${JSON.stringify(part.functionResponse)}`;
         }
       }
       if (!isRecord(part) || typeof part.text !== "string" || Object.keys(part).some((key) => key !== "text")) {
-        throw new WebRequestError("Gemini Web supports text only; files, tool calls and tool results are unavailable");
+        throw new WebRequestError("Unsupported Gemini Web content part; expected text, inline data or a declared tool call/result");
       }
       return part.text;
     }).join("\n");
@@ -91,13 +166,17 @@ export function buildWebPrompt(body: RequestBody): string {
   if (!Array.isArray(request.contents) || !request.contents.length) throw new WebRequestError("A text message is required");
   for (const content of request.contents) {
     if (!isRecord(content) || (content.role !== "user" && content.role !== "model")) throw new WebRequestError("Unsupported conversation role");
-    turns.push(`${content.role === "user" ? "User" : "Assistant"}:\n${partsText(content.parts)}`);
+    turns.push(`${content.role === "user" ? "User" : "Assistant"}:\n${partsText(content.parts, content.role === "user")}`);
   }
   const prompt = turns.join("\n\n");
   if (!prompt.trim() || Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) {
     throw new WebRequestError(`Gemini Web text context is limited to ${MAX_PROMPT_BYTES} UTF-8 bytes`);
   }
-  return prompt;
+  return { prompt, attachments };
+}
+
+export function buildWebPrompt(body: RequestBody): string {
+  return buildWebInput(body).prompt;
 }
 
 function failure(status: number, message: string): ForwardedResponse {
@@ -126,6 +205,8 @@ export function runWebWorker(
     let done = false;
     let settled = false;
     let buffered = "";
+    const imageMode = payload.output === "image" || payload.output === "image-or-text";
+    let image: GeneratedWebImage | undefined;
     const cleanup = (): void => {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
@@ -166,6 +247,7 @@ export function runWebWorker(
     lines.on("line", (line) => {
       if (done) return;
       try {
+        if (Buffer.byteLength(line) > MAX_IMAGE_EVENT_BYTES) throw new Error("output limit");
         const event: unknown = JSON.parse(line);
         if (!isRecord(event)) throw new Error("protocol");
         if (event.type === "error") {
@@ -175,9 +257,11 @@ export function runWebWorker(
         } else if (event.type === "ready" && !ready) {
           ready = true;
           // Tool output is already buffered: validate it before committing HTTP 200.
-          if (!bridge) startResponse();
+          if (!bridge && !imageMode) startResponse();
+        } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
+          image = validateGeneratedWebImage(event);
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
-          if (bridge) {
+          if (imageMode || bridge) {
             buffered += event.text;
             if (buffered.length > 128000) throw new Error("output limit");
             return;
@@ -188,6 +272,11 @@ export function runWebWorker(
             output.once("drain", () => child.stdout.resume());
           }
         } else if (event.type === "done" && ready) {
+          if (imageMode) {
+            if ((!image && (payload.output === "image" || !buffered.trim())) || event.truncated || bridge) { fail(502, "Gemini Web returned no complete generated image"); return; }
+            startResponse();
+            output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: image ? [{ inlineData: image }] : [{ text: buffered }] } }] })}\n\n`);
+          }
           if (bridge) {
             if (event.truncated) { fail(502, "Gemini Web tool response exceeded the output limit"); return; }
             let part: Record<string, unknown>;
@@ -215,13 +304,16 @@ export async function forwardRequest(
 ): Promise<ForwardedResponse> {
   let prompt: string;
   let bridge: ToolBridge | undefined;
+  let attachments: WebAttachment[];
   try {
-    prompt = buildWebPrompt(body);
+    ({ prompt, attachments } = buildWebInput(body));
     if (isRecord(body.request)) {
       const declarations = toolDeclarations(body.request);
       const config = isRecord(body.request.toolConfig) ? body.request.toolConfig.functionCallingConfig : undefined;
       if (declarations.length && !(isRecord(config) && config.mode === "NONE")) {
-        bridge = createToolBridge(declarations);
+        bridge = createToolBridge(declarations, isRecord(config) ? {
+          mode: String(config.mode), allowedFunctionNames: config.allowedFunctionNames as string[] | undefined,
+        } : undefined);
         prompt += `\n\n${bridge.instruction}`;
         if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError(`Gemini Web text context is limited to ${MAX_PROMPT_BYTES} UTF-8 bytes`);
       }
@@ -229,7 +321,7 @@ export async function forwardRequest(
   }
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
   const payload = {
-    mode: "generate", prompt, thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
+    mode: "generate", ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
     proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
   };
   const result = await runWebWorker(payload, signal, bridge);
