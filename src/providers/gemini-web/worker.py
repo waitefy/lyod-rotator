@@ -364,8 +364,21 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
                 await refresh_usage()
             usage = usage_snapshot(client)
             if mode == "probe":
+                identity = None
+                if payload.get("includeIdentity") is True:
+                    from browser_login import parse_identity
+                    response = await client.client.get("https://gemini.google.com/app", timeout=45)
+                    try:
+                        if (response.status_code != 200 or urlsplit(str(response.url)).hostname != "gemini.google.com"
+                                or len(response.text) > 8_000_000):
+                            raise ValueError()
+                        identity = parse_identity(response.text)
+                    except ValueError:
+                        raise WorkerError(401, "Cannot identify the authenticated Gemini account; reconnect the web session") from None
                 emit_event({"type": "ready"})
                 completed = {"type": "done", "usage": usage}
+                if identity is not None:
+                    completed["identity"] = identity
             else:
                 # Validate upstream before sending HTTP 200 to the downstream client.
                 retry_after = exhausted_retry_after(usage)

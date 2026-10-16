@@ -278,7 +278,8 @@ export function runWebWorker(
             done = settled = true;
             cleanup();
             output.destroy();
-            resolve({ endpoint: ENDPOINT, response: Response.json({ usage: event.usage ?? {} }) });
+            resolve({ endpoint: ENDPOINT, response: Response.json({ usage: event.usage ?? {},
+              ...(payload.includeIdentity === true ? { identity: event.identity } : {}) }) });
             return;
           }
           if (imageMode) {

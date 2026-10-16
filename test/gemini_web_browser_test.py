@@ -178,6 +178,33 @@ class BrowserTest(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_receiver_remembers_canonical_email_returned_by_server_and_keeps_session_path(self):
+        (self.root / "legacy.json").write_text(json.dumps({"__Secure-1PSID":"fixture-cookie"}))
+        (self.root / ".admin-token").write_text("fixture-token")
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(200); self.end_headers()
+                self.wfile.write(json.dumps({"ok":True,"email":"owner@example.test","isNew":False}).encode())
+            def log_message(self, *args): pass
+        server = HTTPServer(("127.0.0.1",0), Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+        try:
+            (self.root / "accounts.json").write_text(json.dumps({"proxyPort":server.server_port,"accounts":[
+                {"email":"gemini-web-session@local","credentials":[{"provider":"gemini-web","cookiesFile":"/sessions/legacy.json"}]}]}))
+            payload = {"destination":str(self.root/"default.json"),"stateDir":str(self.root),"apiCookiePath":"/sessions/default.json",
+                "email":None,"cookies":{"__Secure-1PSID":"fixture-cookie"},"identity":{"id":"1234567890","email":"owner@example.test"}}
+            result = subprocess.run([sys.executable,"-c",browser_login.REMOTE_INSTALL],input=json.dumps(payload).encode(),capture_output=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            self.assertEqual(json.loads(result.stdout)["email"],"owner@example.test")
+            saved=json.loads((self.root/"account-identities.json").read_text())["1234567890"]
+            self.assertEqual(saved["email"],"owner@example.test")
+            self.assertEqual(saved["apiCookiePath"],"/sessions/legacy.json")
+            self.assertEqual(calls[0]["cookiesFile"],"/sessions/legacy.json")
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
 
 if __name__ == "__main__":
     unittest.main()

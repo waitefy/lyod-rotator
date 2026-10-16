@@ -13,7 +13,7 @@ import { GEMINI_WEB_MODEL as LEGACY_MODEL, GEMINI_WEB_MODELS, GEMINI_WEB_MAX_PRO
 import { buildWebPrompt, runWebWorker, webCapabilityError } from "../src/providers/gemini-web/forward.js";
 import { classifyUpstreamResponse } from "../src/proxy.js";
 import { validateAccountConfig } from "../src/validators.js";
-import type { AccountRuntime } from "../src/types.js";
+import type { AccountConfig, AccountRuntime, Config } from "../src/types.js";
 import { createToolBridge, toolDeclarations } from "../src/providers/gemini-web/tool-bridge.js";
 import { handleCliLoginApi } from "../src/onboarding.js";
 import { Readable } from "node:stream";
@@ -57,7 +57,7 @@ before(async () => {
   await initDb();
 });
 after(async () => {
-  await removeAccountFromConfig("web-login-fixture@local");
+  await removeAccountFromConfig("web-login-fixture@example.test");
   await rm(temp, { recursive: true, force: true });
 });
 
@@ -360,7 +360,7 @@ for event in [{'type':'ready'},{'type':'delta','text':'OK'},{'type':'done'}]:
       await fakePython(`import json,sys
 request=json.load(sys.stdin)
 assert request['mode']=='probe'
-events=[{'type':'ready'},{'type':'done'}] if ${status}==200 else [{'type':'error','status':${status},'message':'session rejected'}]
+events=[{'type':'ready'},{'type':'done','identity':{'email':'web-login-fixture@example.test','id':'1234567890'}}] if ${status}==200 else [{'type':'error','status':${status},'message':'session rejected'}]
 for event in events: print(json.dumps(event),flush=True)`, async () => {
         const updated: unknown[] = [];
         let code = 0, text = "";
@@ -370,6 +370,10 @@ for event in events: print(json.dumps(event),flush=True)`, async () => {
         await handleCliLoginApi(req, res, { addOrUpdateAccount: async (entry) => { updated.push(entry); } });
         assert.equal(code, status);
         assert.equal(updated.length, status === 200 ? 1 : 0);
+        if (status === 200) {
+          assert.equal((updated[0] as AccountConfig).email, "web-login-fixture@example.test");
+          assert.equal((updated[0] as AccountConfig).credentials![0].providerAccountId, "1234567890");
+        }
         assert.doesNotMatch(text, /private-fixture/);
         const account = { quota: [], config: { email: "fixture", credentials: [{ provider: "gemini-web", cookiesFile }] } } as unknown as AccountRuntime;
         await geminiWebAdapter.fetchQuota(account, {} as never);
@@ -377,6 +381,50 @@ for event in events: print(json.dumps(event),flush=True)`, async () => {
         assert.match(message ?? "", status === 200 ? /background refresh active/ : status === 401 ? /Reconnect/ : /Argon unavailable/);
       });
     }
+  });
+
+  it("merges a verified web login into its real account and retires only the matching synthetic session", async () => {
+    const cookiesFile = join(temp, "canonical-login.json");
+    await writeFile(cookiesFile, JSON.stringify({ "__Secure-1PSID": "private-fixture" }));
+    await fakePython(`import json,sys
+request=json.load(sys.stdin)
+assert request['includeIdentity'] is True
+for event in [{'type':'ready'},{'type':'done','identity':{'email':'web-login-fixture@example.test','id':'1234567890'}}]: print(json.dumps(event),flush=True)`, async () => {
+      const accounts: AccountConfig[] = [
+        { email: "web-login-fixture@example.test", label: "Keep my label", credentials: [{ provider: "google-antigravity", refreshToken: "other-provider" }] },
+        { email: "gemini-web-session@local", credentials: [{ provider: "gemini-web", cookiesFile }] },
+        { email: "different@local", credentials: [{ provider: "gemini-web", cookiesFile: "/sessions/different.json" }] },
+        { email: "shared@local", credentials: [{ provider: "gemini-web", cookiesFile }, { provider: "ollama", apiKey: "other" }] },
+      ];
+      const updated: AccountConfig[] = [], removed: string[] = [];
+      let code = 0, text = "";
+      const req = Readable.from([Buffer.from(JSON.stringify({ provider: "gemini-web", email: "gemini-web-session@local", cookiesFile }))]) as IncomingMessage;
+      req.headers = {};
+      const res = { writeHead(value: number) { code = value; }, end(value: string) { text += value; } } as ServerResponse;
+      await handleCliLoginApi(req, res, {
+        getConfig: () => ({ accounts }) as Config,
+        addOrUpdateAccount: async (entry) => { updated.push(entry); },
+        removeAccount: async (email) => { removed.push(email); return true; },
+      });
+      assert.equal(code, 200);
+      assert.equal(JSON.parse(text).email, accounts[0].email);
+      assert.equal(updated[0].label, "Keep my label");
+      assert.equal(updated[0].credentials![0].providerAccountId, "1234567890");
+      assert.deepEqual(removed, ["gemini-web-session@local"]);
+    });
+  });
+
+  it("refuses to register an alias when a successful probe has no verified identity", async () => {
+    const cookiesFile = join(temp, "unidentified-login.json");
+    await writeFile(cookiesFile, JSON.stringify({ "__Secure-1PSID": "private-fixture" }));
+    await fakePython("import json,sys\njson.load(sys.stdin)\nprint(json.dumps({'type':'ready'}))\nprint(json.dumps({'type':'done'}))", async () => {
+      let code = 0;
+      const req = Readable.from([Buffer.from(JSON.stringify({ provider: "gemini-web", email: "unknown@local", cookiesFile }))]) as IncomingMessage;
+      req.headers = {};
+      const res = { writeHead(value: number) { code = value; }, end() {} } as ServerResponse;
+      await handleCliLoginApi(req, res, { addOrUpdateAccount: async () => { assert.fail("Unverified account must not be registered"); } });
+      assert.equal(code, 401);
+    });
   });
 
   it("streams Unicode deltas through the existing Gemini accumulator without invented usage", async () => {

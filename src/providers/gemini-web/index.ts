@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { dirname, join, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getConfigDir } from "../../paths.js";
@@ -11,19 +11,18 @@ import { SseEventAccumulator } from "../google-antigravity/forward.js";
 import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODEL, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel, getCookiesFile, validateCredentials } from "./credentials.js";
 import { forwardRequest, runWebWorker } from "./forward.js";
 import { applyWebQuota } from "./quota.js";
+import { webAccountFromIdentity } from "./identity.js";
 
 async function runLogin(): Promise<AccountConfig> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let email: string;
   let path: string;
   let browser: boolean;
   try {
     console.log("Gemini App: sign in through a dedicated Firefox profile, or import an existing session file.");
-    email = (await rl.question("Account email or identifier: ")).trim();
     const method = (await rl.question("Login method [browser/file] (browser): ")).trim() || "browser";
-    if (!email || !["browser", "file"].includes(method)) throw new Error("Account identifier and a valid login method are required");
+    if (!["browser", "file"].includes(method)) throw new Error("A valid login method is required");
     browser = method === "browser";
-    const directory = join(getConfigDir(), "gemini-web", createHash("sha256").update(email).digest("hex").slice(0, 24));
+    const directory = join(getConfigDir(), "gemini-web", randomUUID());
     path = browser ? join(directory, "cookies.json") : (await rl.question("Path to cookie JSON: ")).trim();
     if (!path) throw new Error("Cookie file path is required");
   } finally { rl.close(); }
@@ -37,16 +36,16 @@ async function runLogin(): Promise<AccountConfig> {
     });
   }
   const config: AccountConfig = {
-    email, label: email.split("@")[0],
+    email: "pending-gemini-identity",
     credentials: [{ provider: GEMINI_WEB_PROVIDER, cookiesFile: resolve(path) }],
   };
   const valid = await validateCredentials(config);
   if (!valid.ok) throw new Error(valid.error);
-  const { response } = await runWebWorker({ mode: "probe", cookiesFile: getCookiesFile(config) });
-  const result = await response.text();
-  if (!response.ok) throw new Error(`Gemini Web login failed: ${result}`);
+  const { response } = await runWebWorker({ mode: "probe", cookiesFile: getCookiesFile(config), includeIdentity: true });
+  const result = await response.json() as { identity?: unknown };
+  if (!response.ok) throw new Error("Gemini Web login failed; reconnect the browser session");
   console.log("This session offers Argon. No generation request was made.");
-  return config;
+  return webAccountFromIdentity(result.identity, resolve(path));
 }
 
 export const geminiWebAdapter: ProviderAdapter = {

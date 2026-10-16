@@ -7,12 +7,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).parents[1] / "src/providers/gemini-web"))
 spec = importlib.util.spec_from_file_location(
     "worker", Path(__file__).parents[1] / "src/providers/gemini-web/worker.py"
 )
@@ -197,6 +199,33 @@ class WorkerTest(unittest.TestCase):
         events = self.run_client(client, {**self.payload, "mode": "probe"})
         self.assertFalse(client.generated)
         self.assertEqual([e["type"] for e in events], ["ready", "done"])
+
+    def test_login_probe_identifies_authenticated_cookie_owner_without_generating(self):
+        client = Client([model("argon")], [])
+        async def get(url, **kwargs):
+            self.assertEqual(url, "https://gemini.google.com/app")
+            return SimpleNamespace(status_code=200, url=url, text='window.WIZ_global_data = '
+                '{"oPEP7c":"Real@example.test","S06Grb":"1234567890","SNlM0e":"PRIVATE_TOKEN"};')
+        client.client.get = get
+        events = self.run_client(client, {**self.payload, "mode": "probe", "includeIdentity": True})
+        self.assertEqual(events[-1]["identity"], {"email":"real@example.test", "id":"1234567890"})
+        self.assertNotIn("PRIVATE_TOKEN", json.dumps(events))
+        self.assertFalse(client.generated)
+
+    def test_login_probe_rejects_missing_or_redirected_identity_before_ready(self):
+        for url, text in [("https://accounts.google.com/", "sign in"),
+                          ("https://gemini.google.com/app", 'window.WIZ_global_data = {};')]:
+            client = Client([model("argon")], [])
+            async def get(*args, **kwargs):
+                return SimpleNamespace(status_code=200, url=url, text=text)
+            client.client.get = get
+            events = []
+            with self.assertRaises(worker.WorkerError) as caught:
+                asyncio.run(worker.run({**self.payload, "mode":"probe", "includeIdentity":True},
+                    lambda *a, **k:client, emit_event=events.append))
+            self.assertEqual(caught.exception.status, 401)
+            self.assertEqual(events, [])
+            self.assertTrue(client.closed)
 
     def test_guest_session_is_an_auth_error_even_if_argon_is_listed(self):
         for models in ([model("Gemini Flash-Lite")], [model("argon")]):

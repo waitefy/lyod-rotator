@@ -141,8 +141,16 @@ python3 src/providers/gemini-web/browser_login.py --server root@rotator.lyod.onl
 Локальные файлы сессий: `~/.config/tuxevil-rotator/gemini-web/<hash Google ID>/cookies.json`.
 На сервере соответствие ID существующим аккаунтам хранится в приватном
 `/var/lib/tuxevil-rotator-gemini-session/account-identities.json` (права 600).
-Старый аккаунт `gemini-web-session@local` уже привязан к своему Google ID:
-повторный вход обновляет его, сохраняя прежние пути и остальные аккаунты.
+При входе сервер сам получает email и Google ID из авторизованной Gemini App
+и сохраняет ID в `credentials[].providerAccountId`, как идентификатор у Codex.
+Если такой email уже есть в ротаторе, Gemini App добавляется к его провайдерам.
+Старые записи `@local`, содержащие только эту веб-сессию, удаляются после
+успешной привязки к реальному аккаунту. Пути cookies и cache сохраняются.
+
+В таблице Providers показывается один пул Gemini App. Окна 5 часов и недели
+совместно ограничивают его квоту: показывается наиболее ограничивающее окно,
+а при исчерпании нескольких окон — наиболее поздний сброс. Значения обоих
+окон остаются в подробностях последнего опроса аккаунта.
 
 Если вход уже выполнен локально, `--upload-only --cookies-file /path/to/cookies.json`
 повторяет определение аккаунта и перенос. Без `--cookies-file` используется

@@ -1,3 +1,10 @@
+## [4.2.0-argon.4]
+
+- Show one Gemini App quota pool, constrained by both the 5-hour and weekly windows, like Codex.
+- Resolve Gemini App logins to the authenticated Google email and account ID on the server; attach credentials to the existing real account and retire matching web-only `@local` entries.
+- Preserve legacy cookie/cache paths and update the login identity index to the canonical email.
+- Attribute Argon request activity to Gemini App rather than the Antigravity Gemini pool.
+
 ## [4.2.0-argon.3]
 
 - Verify Google's served-model ID against the discovered Argon ID before releasing text, images or tool calls. Discard model mismatches and reject unverifiable responses. Buffer the bounded upstream response until verification completes.

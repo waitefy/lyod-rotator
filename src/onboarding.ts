@@ -34,9 +34,11 @@ import {
 import type { AccountConfig, Config } from "./types.js";
 import { validateCredentials as validateWebCredentials } from "./providers/gemini-web/credentials.js";
 import { runWebWorker } from "./providers/gemini-web/forward.js";
+import { webAccountFromIdentity } from "./providers/gemini-web/identity.js";
 
 interface AccountSink {
   addOrUpdateAccount(account: AccountConfig): Promise<void>;
+  removeAccount?(email: string): Promise<boolean>;
   getConfig?(): Config;
   replaceConfig?(config: Config): Promise<void>;
 }
@@ -751,24 +753,43 @@ export async function handleCliLoginApi(
   if (provider === "gemini-web") {
     const email = typeof body.email === "string" ? body.email.trim() : "";
     const cookiesFile = typeof body.cookiesFile === "string" ? body.cookiesFile : "";
-    const entry: AccountConfig = { email, label: email.split("@")[0], credentials: [{ provider: "gemini-web", cookiesFile }] };
+    let entry: AccountConfig = { email, credentials: [{ provider: "gemini-web", cookiesFile }] };
     const validation = await validateWebCredentials(entry);
     if (!email || email.length > MAX_ACCOUNT_EMAIL_LENGTH || !validation.ok) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "A valid account identifier and private cookie file are required" }));
       return;
     }
-    const { response } = await runWebWorker({ mode: "probe", cookiesFile });
-    await response.text();
+    const { response } = await runWebWorker({ mode: "probe", cookiesFile, includeIdentity: true });
+    const result: unknown = await response.json();
     if (!response.ok) {
       res.writeHead(response.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "Gemini App sign-in rejected or Argon unavailable; reconnect the browser session" }));
       return;
     }
+    try {
+      entry = webAccountFromIdentity((result as { identity?: unknown })?.identity, cookiesFile);
+    } catch {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Cannot identify the authenticated Gemini account; reconnect the browser session" }));
+      return;
+    }
+    const accounts = rotator.getConfig?.().accounts ?? [];
+    const target = accounts.find((account) => account.email.toLowerCase() === entry.email);
+    if (target) {
+      entry.email = target.email;
+      entry.label = target.label ?? entry.label;
+    }
+    // Only retire synthetic, web-only entries for this exact session file.
+    // Other provider credentials and other real accounts must remain intact.
+    const legacy = accounts.filter((account) => account.email !== entry.email && account.email.endsWith("@local") &&
+      account.credentials?.length === 1 && account.credentials[0].provider === "gemini-web" &&
+      account.credentials[0].cookiesFile === cookiesFile);
     const { isNew } = await addAccountToConfig(entry);
     await rotator.addOrUpdateAccount(entry);
+    for (const account of legacy) await rotator.removeAccount?.(account.email);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, email, isNew }));
+    res.end(JSON.stringify({ ok: true, email: entry.email, isNew }));
     return;
   }
 

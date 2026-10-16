@@ -52,7 +52,7 @@ export interface ProviderCredential {
   refreshToken?: string;
   /** Google Antigravity: Cloud project id. */
   projectId?: string;
-  /** Codex/ChatGPT workspace or account id from the OAuth identity claim. */
+  /** Provider account id from OAuth (Codex) or authenticated bootstrap (Gemini App). */
   providerAccountId?: string;
   // How the projectId was obtained.
   projectSource?: "google" | "manual";

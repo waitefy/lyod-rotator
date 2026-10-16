@@ -242,6 +242,9 @@ describe("model pools", () => {
     assert.equal(poolKeyForModel("claude-opus-4-6-thinking"), "claude");
     assert.equal(poolKeyForModel("gpt-oss-120b-medium"), "claude");
     assert.equal(poolKeyForModel("gemini-3.8-flash-low"), "gemini");
+    for (const suffix of ["", "-low", "-medium", "-high"]) {
+      assert.equal(poolKeyForModel(`gemini-4-argon-web${suffix}`), "gemini-web");
+    }
     assert.equal(poolKeyForModel("gpt-5.6-terra"), "openai-codex");
     assert.equal(poolKeyForModel("big-pickle"), "opencode-zen");
     assert.equal(poolKeyForModel("glm-5.1"), "session");
@@ -472,6 +475,7 @@ describe("status and formatting helpers", () => {
 
   it("infers the provider of a quota pool", () => {
     assert.equal(quotaProvider({ modelKey: "gemini" }), "google-antigravity");
+    assert.equal(quotaProvider({ modelKey: "gemini-web" }), "gemini-web");
     assert.equal(quotaProvider({ modelKey: "monthly" }), "ollama");
     assert.equal(quotaProvider({ modelKey: "openai-codex-spark" }), "openai-codex");
     assert.equal(quotaProvider({ modelKey: "x", providerId: "opencode-zen" }), "opencode-zen");

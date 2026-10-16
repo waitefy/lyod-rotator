@@ -153,6 +153,7 @@ try:
  with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=480) as r:
   result=json.load(r)
   if not result.get('ok'): raise RuntimeError()
+  v['email']=result.get('email',v['email'])
  if identity:
   index[identity['id']]={k:v[k] for k in ('email','destination','apiCookiePath')}
   fd,tmp=tempfile.mkstemp(prefix='.gemini-identities-',dir=index_file.parent)

@@ -64,6 +64,7 @@ export interface ModelPool {
 /** Map a request model id to the quota pool it draws from (best effort). */
 export function poolKeyForModel(model: string): string {
   const lower = model.toLowerCase();
+  if (/^gemini-4-argon-web(?:-(?:low|medium|high))?$/.test(lower)) return "gemini-web";
   if (lower === "big-pickle" || lower.endsWith("-free")) return "opencode-zen";
   if (lower.includes("claude") || lower.startsWith("gpt-oss-120b")) return "claude";
   if (lower.includes("gemini")) return "gemini";

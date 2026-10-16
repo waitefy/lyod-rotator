@@ -28,6 +28,9 @@ describe("Gemini Web compute quota", () => {
     const pool = account.quota.find((row) => row.modelKey === "gemini-web")!;
     assert.ok(pool.percentRemaining > 0 && pool.percentRemaining < 1);
     assert.equal(pool.timerType, "5h");
+    assert.deepEqual(account.quota.filter((row) => row.providerId === "gemini-web").map((row) => row.modelKey), ["gemini-web"]);
+    assert.equal(pool.displayName, "Gemini App");
+    assert.match(account.lastPollByProvider!["gemini-web"], /5-hour.*weekly/);
     assert.deepEqual(cooldowns, []);
   });
 

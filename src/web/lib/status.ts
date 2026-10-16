@@ -129,6 +129,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   "google-antigravity": "Antigravity",
   ollama: "Ollama",
   "openai-codex": "Codex",
+  "gemini-web": "Gemini App",
   "opencode-zen": "OpenCode Zen",
 };
 
@@ -146,6 +147,7 @@ export function providerLabel(id: string): string {
 export function quotaProvider(quota: Pick<ModelQuota, "providerId" | "modelKey">): string {
   if (quota.providerId) return quota.providerId;
   const key = String(quota.modelKey || "");
+  if (key === "gemini-web" || key.startsWith("gemini-web:")) return "gemini-web";
   if (key === "claude" || key === "gemini") return "google-antigravity";
   if (key === "monthly" || key === "session" || key === "weekly") return "ollama";
   if (key.startsWith("opencode")) return "opencode-zen";

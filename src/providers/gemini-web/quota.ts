@@ -37,7 +37,9 @@ export function applyWebQuota(account: AccountRuntime, data: unknown, ctx: Quota
   const dominant = exhausted.length ? exhausted.reduce((a, b) =>
     (b.resetTime ? Date.parse(b.resetTime) : now + 60000) > (a.resetTime ? Date.parse(a.resetTime) : now + 60000) ? b : a)
     : windows.reduce<ModelQuota | undefined>((a, b) => !a || b.percentRemaining < a.percentRemaining ? b : a, undefined);
-  const rows = dominant ? [{ ...dominant, modelKey: GEMINI_WEB_PROVIDER, displayName: "Gemini App compute" }, ...windows] : [];
+  // Like Codex, expose one routing pool constrained by both windows. Window
+  // details belong in the poll summary, not in three independently counted pools.
+  const rows = dominant ? [{ ...dominant, modelKey: GEMINI_WEB_PROVIDER, displayName: "Gemini App" }] : [];
   account.quota = [...account.quota.filter((row) => row.providerId !== GEMINI_WEB_PROVIDER), ...rows];
   account.lastPollByProvider ??= {};
   account.lastPollByProvider[GEMINI_WEB_PROVIDER] = windows.length
