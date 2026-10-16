@@ -1,3 +1,10 @@
+## [4.2.0-argon.2]
+
+- Support client function tools with arbitrary names and validated schemas through Chat Completions, Responses, Anthropic Messages and native Gemini requests. Keep execution and permissions in the client.
+- Accept inline PNG/JPEG/WebP/GIF images and PDF/TXT/CSV documents, including conversation history and tool results, with bounded private uploads and cancellation cleanup.
+- Add image generation through Images API, Responses image_generation and Gemini IMAGE modalities. Return validated base64 image bytes, buffer image SSE until success, and preserve unavailable usage reporting.
+- Preserve large image worker events across persistent sessions and route the former unsuffixed Argon model id through the web provider.
+
 ## [4.2.0-argon.1] — local fork
 
 - Raise the Gemini Web prompt budget from 48,000 UTF-8 bytes to 4 MiB and the client context estimate to 262,144 tokens. Size the internal JSON channel for escaping expansion; preserve large Unicode tool results and keep an explicit byte limit.

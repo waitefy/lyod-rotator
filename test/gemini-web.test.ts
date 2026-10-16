@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { after, before, describe, it } from "node:test";
-import { buildOpenAIModelCatalog, openAIToAntigravityBody, handleOpenAIChatCompletions } from "../src/compat.js";
+import { buildOpenAIModelCatalog, openAIToAntigravityBody, handleOpenAIChatCompletions, handleOpenAIResponsesCreate, handleAnthropicMessages } from "../src/compat.js";
 import type { AccountRotator } from "../src/rotator.js";
 import { resolveModelRoute } from "../src/model-catalog.js";
 import { findProviderForModel, getProviderIdForPoolKey } from "../src/providers/registry.js";
@@ -22,28 +22,33 @@ import { removeAccountFromConfig } from "../src/account-store.js";
 import { initDb } from "../src/db-store.js";
 
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
-  type: "object", properties: { path: { type: "string" }, i: { type: "string" }, offset: { type: "integer" } }, required: ["path", "i"],
+  type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 }, i: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["path", "i"],
 } } };
 const globTool = { type: "function" as const, function: { name: "glob", parameters: {
-  type: "object", properties: { i: { type: "string" }, path: { type: "string" }, hidden: { type: "boolean" }, limit: { type: "number" } }, required: ["i"],
+  type: "object", additionalProperties: false, properties: { i: { type: "string" }, path: { type: "string" }, hidden: { type: "boolean" }, limit: { type: "number" } }, required: ["i"],
 } } };
 const grepTool = { type: "function" as const, function: { name: "grep", parameters: {
-  type: "object", properties: { i: { type: "string" }, pattern: { type: "string" }, path: { type: "string" }, skip: { type: ["number", "null"] } }, required: ["pattern", "i"],
+  type: "object", additionalProperties: false, properties: { i: { type: "string" }, pattern: { type: "string" }, path: { type: "string" }, skip: { type: ["number", "null"], minimum: 0 } }, required: ["pattern", "i"],
 } } };
 const searchTools = [readTool, globTool, grepTool];
 const editTool = { type: "function" as const, function: { name: "edit", parameters: {
-  type: "object", properties: { i: { type: "string" }, input: { type: "string" } }, required: ["input", "i"],
+  type: "object", additionalProperties: false, properties: { i: { type: "string" }, input: { type: "string", minLength: 1 } }, required: ["input", "i"],
 } } };
 const writeTool = { type: "function" as const, function: { name: "write", parameters: {
-  type: "object", properties: { i: { type: "string" }, path: { type: "string" }, content: { type: "string" } }, required: ["path", "i"],
+  type: "object", additionalProperties: false, properties: { i: { type: "string" }, path: { type: "string", minLength: 1 }, content: { type: "string" } }, required: ["path", "i"],
 } } };
 const fileTools = [...searchTools, editTool, writeTool];
 const bashTool = { type: "function" as const, function: { name: "bash", parameters: {
-  type: "object", properties: { command: { type: "string" }, i: { type: "string" }, cwd: { type: "string" },
-    timeout: { type: "number" }, pty: { type: "boolean" }, async: { type: "boolean" }, name: { type: "string" }, ready: { type: "object" } },
+  type: "object", additionalProperties: false, properties: { command: { type: "string", minLength: 1 }, i: { type: "string" }, cwd: { type: "string" },
+    timeout: { type: "number", minimum: 0 }, pty: { type: "boolean" }, async: { type: "boolean" }, name: { type: "string" }, ready: { type: "object" } },
   required: ["command", "i"],
 } } };
-const allTools = [...fileTools, bashTool];
+const customTool = { type: "function" as const, function: { name: "mcp__project__update", parameters: {
+  type: "object", properties: { operations: { type: "array", items: { type: "object", properties: {
+    file: { type: "string" }, delta: { type: ["integer", "null"], minimum: -5 },
+  }, required: ["file", "delta"], additionalProperties: false } } }, required: ["operations"], additionalProperties: false,
+} } };
+const allTools = [...fileTools, bashTool, customTool];
 const GEMINI_WEB_MODEL = GEMINI_WEB_MODELS[0];
 
 const temp = await mkdtemp(join(tmpdir(), "gemini-web-contract-"));
@@ -83,7 +88,7 @@ describe("Gemini Web integration", () => {
     assert.equal(entry.owned_by, "gemini-web");
     assert.equal(entry.context_window, 262144);
     assert.equal(entry.meta.tool_calling, false);
-    assert.equal(entry.meta.multimodal, false);
+    assert.equal(entry.meta.multimodal, true);
     assert.equal(entry.meta.usage_unavailable, true);
     assert.equal(buildOpenAIModelCatalog(source(true, [`gemini-web/${GEMINI_WEB_MODEL}`]) as never).some((m) => m.id === GEMINI_WEB_MODEL), false);
   });
@@ -101,14 +106,14 @@ describe("Gemini Web integration", () => {
     assert.doesNotMatch(JSON.stringify(failure), /fixture-cookie-value/);
   });
 
-  it("preserves text history and rejects images, tools, structured output and oversized UTF-8", () => {
+  it("preserves text history and rejects invalid parts, tools, structured output and oversized UTF-8", () => {
     const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, messages: [
       { role: "system", content: "Keep it short." }, { role: "user", content: "Привет" },
       { role: "assistant", content: "Здравствуйте" }, { role: "user", content: "🌍" },
     ] });
     const prompt = buildWebPrompt(body);
     for (const text of ["Keep it short.", "Привет", "Здравствуйте", "🌍"]) assert.ok(prompt.includes(text));
-    assert.throws(() => buildWebPrompt({ ...body, request: { contents: [{ role: "user", parts: [{ inlineData: { data: "abc" } }] }] } }), /text only/);
+    assert.throws(() => buildWebPrompt({ ...body, request: { contents: [{ role: "user", parts: [{ inlineData: { data: "abc" } }] }] } }), /MIME type/);
     assert.throws(() => buildWebPrompt({ ...body, request: { tools: [{}] } }), /API tool/);
     assert.throws(() => buildWebPrompt(openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, messages: [{ role: "user", content: "🌍".repeat(GEMINI_WEB_MAX_PROMPT_BYTES / 4 + 1) }] })), /UTF-8/);
     assert.ok(webCapabilityError({ response_format: { type: "json_schema" } }));
@@ -176,15 +181,15 @@ describe("Gemini Web integration", () => {
         { role: "tool", tool_call_id: "call_edit", content: "EDIT_ERROR: stale tag; reread file" }] });
       assert.match(buildWebPrompt(history), /EDIT_ERROR: stale tag; reread file/);
     }
-    for (const [name, args] of [["edit", { i: "Edit" }], ["edit", { i: "Edit", input: " " }],
-      ["edit", { i: "Edit", input: patch, command: "pwd" }], ["write", { i: "Write", path: " " }],
+    for (const [name, args] of [["edit", { i: "Edit" }], ["edit", { i: "Edit", input: "" }],
+      ["edit", { i: "Edit", input: patch, command: "pwd" }], ["write", { i: "Write", path: "" }],
       ["write", { i: "Write", path: "a", content: 1 }], ["eval", { command: "pwd" }]]) {
       assert.throws(() => bridge.parse(marker + JSON.stringify({ name, arguments: args })));
     }
-    assert.ok(webCapabilityError({ ...original, tools: [...fileTools, { ...writeTool, function: { ...writeTool.function, name: "eval" } }] }));
+    assert.equal(webCapabilityError({ ...original, tools: [...fileTools, { ...writeTool, function: { ...writeTool.function, name: "eval" } }] }), undefined);
   });
 
-  it("bridges foreground bash and preserves failing command output and exit status", () => {
+  it("bridges bash according to its client schema and preserves command output and exit status", () => {
     const command = "python3 test_calculator.py";
     const original = { model: GEMINI_WEB_MODEL, tools: allTools, messages: [{ role: "user" as const, content: "run tests" }] };
     assert.equal(webCapabilityError(original), undefined);
@@ -193,9 +198,11 @@ describe("Gemini Web integration", () => {
     const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
     const args = { command, i: "Run tests", cwd: "/tmp/project", timeout: 30, pty: false, async: false };
     assert.deepEqual(bridge.parse(marker + JSON.stringify({ name: "bash", arguments: args })), { functionCall: { name: "bash", args } });
-    for (const invalid of [{ ...args, command: " " }, { ...args, command: 1 }, { ...args, timeout: -1 },
-      { ...args, cwd: 1 }, { ...args, async: true }, { ...args, pty: true }, { ...args, ready: {} },
-      { ...args, name: "server" }, { ...args, unknown: "x" }, { command }]) {
+    for (const extra of [{ async: true }, { pty: true }, { ready: {} }, { name: "server" }]) {
+      assert.doesNotThrow(() => bridge.parse(marker + JSON.stringify({ name: "bash", arguments: { ...args, ...extra } })));
+    }
+    for (const invalid of [{ ...args, command: "" }, { ...args, command: 1 }, { ...args, timeout: -1 },
+      { ...args, cwd: 1 }, { ...args, unknown: "x" }, { command }]) {
       assert.throws(() => bridge.parse(marker + JSON.stringify({ name: "bash", arguments: invalid })));
     }
     const history = openAIToAntigravityBody({ ...original, messages: [...original.messages,
@@ -215,7 +222,7 @@ describe("Gemini Web integration", () => {
     assert.match(prompt, /Client tool call/);
     assert.match(prompt, /random fixture result/);
     assert.ok(webCapabilityError({ ...original, tools: [{ type: "function", function: { ...readTool.function, name: "eval" } }] }));
-    assert.ok(webCapabilityError({ ...original, tool_choice: "required" }));
+    assert.equal(webCapabilityError({ ...original, tool_choice: "required" }), undefined);
     const bridge = createToolBridge([readTool.function]);
     const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
     assert.deepEqual(bridge.parse(`${marker}{"name":"read","arguments":{"path":"a.txt","i":"Read"}}`), {
@@ -430,7 +437,7 @@ for event in [{'type':'ready'}, {'type':'error','status':502,'message':'upstream
     });
   });
 
-  it("serves real HTTP chat and SSE and isolates rejected browser credentials", async () => {
+  it("serves chat, Responses and Anthropic tools over HTTP/SSE and isolates rejected credentials", async () => {
     const cookiesFile = join(temp, "http-cookies.json");
     await writeFile(cookiesFile, JSON.stringify({ "__Secure-1PSID": "test-only" }));
     const account = {
@@ -438,11 +445,12 @@ for event in [{'type':'ready'}, {'type':'error','status':502,'message':'upstream
       inFlightRequests: 0, inFlightByModel: {}, disabled: false, flagged: false,
     } as AccountRuntime;
     const invalid: string[] = [];
+    let finished = 0;
     const rotator = {
       getConfig: () => ({}), hasActiveProvider: (id: string) => id === "gemini-web",
       getActiveAccount: async () => account, getRetryAfterMs: () => 0,
       resolveQuotaModelKeyForDisplay: () => "gemini-web", getSafetyJitterMs: () => 0,
-      getGlobalDelayMs: () => 0, recordUpstreamAttempt: () => {}, finishRequest: () => {},
+      getGlobalDelayMs: () => 0, recordUpstreamAttempt: () => {}, finishRequest: () => { finished++; },
       recordRequest: () => false, recordProxyEvent: () => {}, recordLatency: () => {},
       recordRequestLog: () => {}, recordTokenUsage: () => {}, saveState: () => {},
       markProviderInvalid: (_account: AccountRuntime, id: string) => invalid.push(id),
@@ -450,7 +458,9 @@ for event in [{'type':'ready'}, {'type':'error','status':502,'message':'upstream
       markError: () => assert.fail("must not penalize other account credentials"),
     } as unknown as AccountRotator;
     const server = createServer((req, res) => {
-      void handleOpenAIChatCompletions(req, res, rotator).catch((error) => {
+      const handler = req.url === "/v1/responses" ? handleOpenAIResponsesCreate
+        : req.url === "/v1/messages" ? handleAnthropicMessages : handleOpenAIChatCompletions;
+      void handler(req, res, rotator).catch((error) => {
         res.writeHead(500); res.end(String(error));
       });
     });
@@ -488,15 +498,23 @@ else:
         await rejected.text();
         assert.deepEqual(invalid, ["gemini-web"]);
       });
+      await fakePython("raise AssertionError('unsupported schema must not reach the worker')", async () => {
+        const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: GEMINI_WEB_MODEL, messages: [{ role: "user", content: "test" }], tools: [
+            { type: "function", function: { name: "custom", parameters: { type: "object", properties: { x: { $ref: "#/$defs/X" } } } } },
+          ] }) });
+        assert.equal(response.status, 400);
+        assert.match((await response.json()).error.message, /parameters\.properties\.x\.\$ref: unsupported schema keyword/);
+      });
       await fakePython(`import json, sys, re
 prompt = json.load(sys.stdin)['prompt']
 marker = re.search(r'ROTATOR_TOOL_[a-f0-9-]+', prompt).group(0)
-name = next((name for name in ['bash','edit','write','grep','glob'] if 'REQUEST_' + name.upper() in prompt), 'read')
-args = {'command':'python3 test_calculator.py','i':'Run tests','timeout':30} if name == 'bash' else {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'input':'[fixture.txt#A1B2]\\nPUT 1.=1:\\n+updated','i':'Edit fixture'} if name == 'edit' else {'path':'fixture.txt','content':'created','i':'Write fixture'} if name == 'write' else {'path':'fixture.txt','i':'Read fixture'}
+name = 'mcp__project__update' if 'REQUEST_CUSTOM' in prompt else next((name for name in ['bash','edit','write','grep','glob'] if 'REQUEST_' + name.upper() in prompt), 'read')
+args = {'operations':[{'file':'fixture.txt','delta':-2},{'file':'other.txt','delta':None}]} if name == 'mcp__project__update' else {'command':'python3 test_calculator.py','i':'Run tests','timeout':30} if name == 'bash' else {'pattern':'fixture','i':'Search fixture'} if name == 'grep' else {'input':'[fixture.txt#A1B2]\\nPUT 1.=1:\\n+updated','i':'Edit fixture'} if name == 'edit' else {'path':'fixture.txt','content':'created','i':'Write fixture'} if name == 'write' else {'path':'fixture.txt','i':'Read fixture'}
 text = 'FILE_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt else marker + json.dumps({'name':name,'arguments':args})
 for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
     print(json.dumps(event), flush=True)`, async () => {
-        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"], ["edit", "REQUEST_EDIT"], ["write", "REQUEST_WRITE"], ["bash", "REQUEST_BASH"]]) {
+        for (const [name, content] of [["read", "Read fixture.txt"], ["glob", "REQUEST_GLOB"], ["grep", "REQUEST_GREP"], ["edit", "REQUEST_EDIT"], ["write", "REQUEST_WRITE"], ["bash", "REQUEST_BASH"], ["mcp__project__update", "REQUEST_CUSTOM"]]) {
         for (const stream of [false, true]) {
           const messages: unknown[] = [{ role: "user", content }];
           const send = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -512,13 +530,129 @@ for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
             const result = await response.json();
             const call = result.choices[0].message.tool_calls[0];
             assert.equal(call.function.name, name);
-            assert.deepEqual(JSON.parse(call.function.arguments), name === "bash" ? { command: "python3 test_calculator.py", i: "Run tests", timeout: 30 } : name === "grep" ? { pattern: "fixture", i: "Search fixture" } : name === "edit" ? { input: "[fixture.txt#A1B2]\nPUT 1.=1:\n+updated", i: "Edit fixture" } : name === "write" ? { path: "fixture.txt", content: "created", i: "Write fixture" } : { path: "fixture.txt", i: "Read fixture" });
+            assert.deepEqual(JSON.parse(call.function.arguments), name === "mcp__project__update" ? { operations: [{ file: "fixture.txt", delta: -2 }, { file: "other.txt", delta: null }] } : name === "bash" ? { command: "python3 test_calculator.py", i: "Run tests", timeout: 30 } : name === "grep" ? { pattern: "fixture", i: "Search fixture" } : name === "edit" ? { input: "[fixture.txt#A1B2]\nPUT 1.=1:\n+updated", i: "Edit fixture" } : name === "write" ? { path: "fixture.txt", content: "created", i: "Write fixture" } : { path: "fixture.txt", i: "Read fixture" });
             messages.push(result.choices[0].message, { role: "tool", tool_call_id: call.id, content: "FILE_ROUND_TRIP_OK" });
             const final = await send();
             assert.equal(final.status, 200);
             assert.equal((await final.json()).choices[0].message.content, "FILE_ROUND_TRIP_OK");
           }
         }
+        }
+      });
+      await fakePython(`import json, sys, re
+prompt = json.load(sys.stdin)['prompt']
+marker = re.search(r'ROTATOR_TOOL_[a-f0-9-]+', prompt)
+text = 'API_ROUND_TRIP_OK' if 'Client tool result (data):' in prompt or marker is None else marker.group(0) + json.dumps({'name':'custom','arguments':{'type':'image_url'}})
+for event in [{'type':'ready'}, {'type':'delta','text':text}, {'type':'done'}]:
+    print(json.dumps(event), flush=True)`, async () => {
+        const parameters = { type: "object", properties: { type: { type: "string" } }, required: ["type"] };
+        const send = (path: string, payload: unknown) => fetch(new URL(path, url), { method: "POST",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        for (const format of ["chat", "responses", "anthropic"] as const) {
+          const path = format === "responses" ? "/v1/responses" : format === "anthropic" ? "/v1/messages" : "/v1/chat/completions";
+          const tools = format === "responses" ? [{ type: "function", name: "custom", parameters }]
+            : format === "anthropic" ? [{ name: "custom", input_schema: parameters }]
+            : [{ type: "function", function: { name: "custom", parameters } }];
+          const named = format === "responses" ? { type: "function", name: "custom" }
+            : format === "anthropic" ? { type: "tool", name: "custom" }
+            : { type: "function", function: { name: "custom" } };
+          for (const choice of [format === "anthropic" ? { type: "any" } : "required", named]) {
+            for (const stream of [false, true]) {
+              const base = { model: GEMINI_WEB_MODEL, tools, max_tokens: 100 };
+              const payload = { ...base, stream, tool_choice: choice,
+                ...(format === "responses" ? { input: "Use custom" } : { messages: [{ role: "user", content: "Use custom" }] }) };
+              const response = await send(path, payload);
+              assert.equal(response.status, 200, await response.clone().text());
+              assert.equal(response.headers.get("X-Rotator-Usage"), "unavailable");
+              if (stream) {
+                const sse = await response.text();
+                assert.doesNotMatch(sse, /ROTATOR_TOOL_/);
+                assert.match(sse, format === "responses" ? /response.function_call_arguments.done/ : format === "anthropic" ? /"type":"tool_use"/ : /"tool_calls"/);
+                assert.match(sse, format === "responses" ? /response.completed/ : format === "anthropic" ? /message_stop/ : /\[DONE\]/);
+              } else {
+                const result = await response.json();
+                const call = format === "responses" ? result.output.find((item: { type: string }) => item.type === "function_call")
+                  : format === "anthropic" ? result.content.find((item: { type: string }) => item.type === "tool_use")
+                  : result.choices[0].message.tool_calls[0];
+                assert.ok(call);
+                assert.equal(format === "chat" ? call.function.name : call.name, "custom");
+                assert.deepEqual(format === "anthropic" ? call.input : JSON.parse(format === "chat" ? call.function.arguments : call.arguments), { type: "image_url" });
+                const continuation = format === "responses" ? { previous_response_id: result.id,
+                  input: [{ type: "function_call_output", call_id: call.call_id, output: "API_ROUND_TRIP_OK" }] }
+                  : { messages: [{ role: "user", content: "Use custom" },
+                    format === "anthropic" ? { role: "assistant", content: result.content } : result.choices[0].message,
+                    format === "anthropic" ? { role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content: "API_ROUND_TRIP_OK" }] }
+                      : { role: "tool", tool_call_id: call.id, content: "API_ROUND_TRIP_OK" }] };
+                const final = await send(path, { ...base, ...continuation });
+                assert.equal(final.status, 200, await final.clone().text());
+                const json = await final.json();
+                assert.equal(format === "responses" ? json.output_text : format === "anthropic" ? json.content[0].text : json.choices[0].message.content, "API_ROUND_TRIP_OK");
+              }
+            }
+          }
+          const disabled = await send(path, { model: GEMINI_WEB_MODEL, tools, max_tokens: 100,
+            tool_choice: format === "anthropic" ? { type: "none" } : "none",
+            ...(format === "responses" ? { input: "No tools" } : { messages: [{ role: "user", content: "No tools" }] }) });
+          assert.equal(disabled.status, 200);
+          assert.match(await disabled.text(), /API_ROUND_TRIP_OK/);
+        }
+      });
+      await fakePython(`import json
+for event in [{'type':'ready'}, {'type':'delta','text':'No tool call'}, {'type':'done'}]:
+    print(json.dumps(event), flush=True)`, async () => {
+        for (const stream of [false, true]) {
+          const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: GEMINI_WEB_MODEL, tools: [readTool], tool_choice: "required", stream,
+              messages: [{ role: "user", content: "Read fixture" }] }) });
+          assert.equal(response.status, 502);
+          assert.match(await response.text(), /invalid tool call/);
+        }
+      });
+      const started = join(temp, "http-cancel-started");
+      const stopped = join(temp, "http-cancel-stopped");
+      await fakePython(`import json,sys,time,signal,pathlib
+json.load(sys.stdin)
+def stop(*args):
+ pathlib.Path(${JSON.stringify(stopped)}).write_text('stopped')
+ raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+pathlib.Path(${JSON.stringify(started)}).write_text('started')
+print(json.dumps({'type':'ready'}),flush=True)
+time.sleep(30)`, async () => {
+        for (const path of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
+          for (const stream of [false, true]) {
+            await Promise.all([rm(started, { force: true }), rm(stopped, { force: true })]);
+            const beforeFinished = finished;
+            const controller = new AbortController();
+            const pending = fetch(`http://127.0.0.1:${address.port}${path}`, {
+              method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+              body: JSON.stringify({ model: GEMINI_WEB_MODEL, stream, max_tokens: 100,
+                tools: path === "/v1/messages" ? [{ name: "read", input_schema: readTool.function.parameters }]
+                  : path === "/v1/responses" ? [{ type: "function", ...readTool.function }] : [readTool],
+                ...(path === "/v1/responses" ? { input: "Read fixture" }
+                  : { messages: [{ role: "user", content: "Read fixture" }] }),
+              }),
+            });
+            // Observe rejection immediately even if setup fails before assert.rejects.
+            void pending.catch(() => {});
+            try {
+              for (let i = 0; i < 200 && !(await readFile(started, "utf8").catch(() => "")); i++) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+              assert.equal(await readFile(started, "utf8"), "started");
+              controller.abort();
+              await assert.rejects(pending, { name: "AbortError" });
+              for (let i = 0; i < 200; i++) {
+                if (finished > beforeFinished && await readFile(stopped, "utf8").catch(() => "")) break;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+              assert.equal(await readFile(stopped, "utf8"), "stopped", `${path} stream=${stream}: worker still running`);
+              assert.ok(finished > beforeFinished, `${path} stream=${stream}: account not released`);
+            } finally {
+              controller.abort();
+              await pending.catch(() => {});
+            }
+          }
         }
       });
     } finally {

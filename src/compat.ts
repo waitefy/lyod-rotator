@@ -1,6 +1,7 @@
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
-import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER } from "./providers/gemini-web/credentials.js";
+import { validateGeneratedWebImage, validateWebImageRequest, webGeminiImageMode, webResponsesImageMode, type WebImageMode } from "./providers/gemini-web/image-output.js";
+import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel } from "./providers/gemini-web/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import {
@@ -154,6 +155,8 @@ function compatRoute(rotator: AccountRotator, model: string): CompatRoute {
     const sameId = route.modelId.toLowerCase() === model.toLowerCase();
     return { off: false, providerId: route.providerId, pinned: true, ...(sameId ? { modelId: route.modelId } : {}) };
   }
+  // The legacy unsuffixed Argon id is intentionally absent from the catalog.
+  if (getWebThinkingLevel(model) !== undefined) return { off: false, providerId: GEMINI_WEB_PROVIDER, pinned: true };
   if (isCodexModelForRotator(rotator, model)) return { off: false, providerId: "openai-codex", pinned: false };
   if (isOpenCodeZenModel(model)) return { off: false, providerId: OPENCODE_ZEN_PROVIDER_ID, pinned: false };
   if (rotator?.getOllamaModels?.().includes(model)) return { off: false, providerId: "ollama", pinned: false };
@@ -518,7 +521,7 @@ export function parseOpenAiJson(raw: string): CompatCompletion {
   };
 }
 
-export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: boolean } = {}): CompatCompletion {
+export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: boolean; includeImages?: boolean } = {}): CompatCompletion {
   let text = "";
   let thinkingText = "";
   let inputTokens = 0;
@@ -526,6 +529,7 @@ export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: b
   let cachedTokens: number | undefined;
   let responseId: string | undefined;
   let upstreamFinishReason: string | undefined;
+  const images: NonNullable<CompatCompletion["images"]> = [];
   const toolCallsMap = new Map<string, OpenAIToolCall>();
   let toolCallIndex = 0;
 
@@ -557,6 +561,9 @@ export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: b
           continue;
         for (const part of candidate.content.parts) {
           if (!isRecord(part)) continue;
+          if (options.includeImages && part.inlineData !== undefined) {
+            images.push(validateGeneratedWebImage(part.inlineData));
+          }
           if (typeof part.text === "string") {
             // Route thought blocks separately from normal text
             if (part.thought === true) {
@@ -646,6 +653,7 @@ export function parseAntigravitySse(raw: string, options: { allowLegacyTools?: b
     toolCallsMap.size > 0 ? [...toolCallsMap.values()] : undefined;
   return {
     text: parsedText,
+    ...(images.length ? { images } : {}),
     thinkingText: thinkingText || undefined,
     inputTokens,
     outputTokens,
@@ -2401,7 +2409,10 @@ async function completeViaRotator(
             ? parseOpenAiJson(raw)
             : format === "ollama"
               ? parseOllamaNdjson(raw)
-              : parseAntigravitySse(raw, { allowLegacyTools: context.providerId !== GEMINI_WEB_PROVIDER });
+              : parseAntigravitySse(raw, {
+                allowLegacyTools: context.providerId !== GEMINI_WEB_PROVIDER,
+                includeImages: context.providerId === GEMINI_WEB_PROVIDER && (body.requestType === "image-generation" || body.requestType === "image-or-text"),
+              });
           if (completion.inputTokens > 0 || completion.outputTokens > 0) {
             rotator.recordTokenUsage(
               context.displayModelKey,
@@ -2727,7 +2738,7 @@ export function buildOpenAIModelCatalog(
       context_window: GEMINI_WEB_CONTEXT, max_model_len: GEMINI_WEB_CONTEXT,
       meta: {
         context_length: GEMINI_WEB_CONTEXT, family: "gemini-web", provider: GEMINI_WEB_PROVIDER,
-        multimodal: false, tool_calling: false, streaming: true, limited_web: true,
+        multimodal: true, tool_calling: false, streaming: true, limited_web: true,
         usage_unavailable: true, system_prompt: "text-emulated", max_prompt_bytes: 48000,
       },
     });
@@ -2891,12 +2902,27 @@ export async function handleGeminiGenerateContent(
       tools: parsed.tools,
     },
   };
+  let webImageMode: WebImageMode | undefined;
+  const nativeRoute = compatRoute(rotator, selectedModel);
+  if (!nativeRoute.off && nativeRoute.providerId === GEMINI_WEB_PROVIDER) {
+    try { webImageMode = webGeminiImageMode(body.request); }
+    catch (error) {
+      return writeJson(res, 400, { error: { status: "INVALID_ARGUMENT", message: error instanceof Error ? error.message : "Invalid output modalities" } });
+    }
+    if (webImageMode) {
+      body.providerId = GEMINI_WEB_PROVIDER;
+      body.requestType = webImageMode === "image" ? "image-generation" : webImageMode;
+      res.setHeader("X-Rotator-Usage", "unavailable");
+      res.setHeader("X-Rotator-Provider-Mode", "limited-web");
+      res.setHeader("Cache-Control", "no-store");
+    }
+  }
   const started = Date.now();
   const result = await completeViaRotator(req, res, rotator, body, "none", {
     callType: "gemini",
     apiKeyHash,
     requesterIp: req.socket?.remoteAddress || null,
-    rawRequest: parsed,
+    rawRequest: webImageMode ? { model: selectedModel, image_generation: true } : parsed,
   });
   if (result.status !== 200) {
     const retrySec = extractRetryAfterSeconds(result.errorText);
@@ -2933,6 +2959,18 @@ export async function handleGeminiGenerateContent(
     retries: result.context?.retries,
     compression: getCompressionHeaderOpts(result.compressionStats),
   });
+  if (webImageMode) {
+    const payload = { candidates: [{ content: { role: "model", parts: [
+      ...(result.completion.text ? [{ text: result.completion.text }] : []),
+      ...(result.completion.images ?? []).map((inlineData) => ({ inlineData })),
+    ] }, finishReason: "STOP" }] };
+    if (pathname.endsWith(":streamGenerateContent")) {
+      res.writeHead(200, { ...rotatorHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
+      res.end(`data: ${JSON.stringify(payload)}\n\n`);
+      return;
+    }
+    return writeJson(res, 200, payload, rotatorHeaders);
+  }
   writeJson(res, 200, {
     candidates: [
       {
@@ -2953,6 +2991,59 @@ export async function handleGeminiGenerateContent(
         : {}),
     },
   }, rotatorHeaders);
+}
+
+/** Images API subset for the web provider; generation uses ordinary account admission. */
+export async function handleOpenAIImageGenerations(
+  req: IncomingMessage, res: ServerResponse, rotator: AccountRotator,
+): Promise<void> {
+  let parsed: unknown;
+  try { parsed = await readJsonBody(req); }
+  catch (error) {
+    return writeJson(res, error instanceof PayloadTooLargeError ? 413 : 400, {
+      error: { type: "invalid_request_error", message: error instanceof PayloadTooLargeError ? "Payload too large" : "Invalid JSON body" },
+    });
+  }
+  let input: ReturnType<typeof validateWebImageRequest>;
+  try { input = validateWebImageRequest(parsed); }
+  catch (error) {
+    return writeJson(res, 400, { error: { type: "invalid_request_error", message: (error as Error).message } });
+  }
+  const auth = await authenticateVirtualKey(req, input.model);
+  if (!auth.authenticated) return sendAuthErrorResponse(res, auth);
+  const route = compatRoute(rotator, input.model);
+  if (route.off) return openAIModelOff(res, input.model);
+  if (route.providerId !== GEMINI_WEB_PROVIDER) {
+    return writeJson(res, 400, { error: { type: "invalid_request_error", message: "Image generation is available only through the Gemini Web provider" } });
+  }
+  const body: RequestBody = {
+    project: "", model: route.modelId ?? input.model, providerId: GEMINI_WEB_PROVIDER,
+    requestedModel: input.model, requestType: "image-generation",
+    request: { contents: [{ role: "user", parts: [{ text: `Generate one image from the following description using image generation.\n\n${input.prompt}` }] }] },
+  };
+  if (isRequestOff(rotator, body)) return openAIModelOff(res, input.model);
+  res.setHeader("X-Rotator-Usage", "unavailable");
+  res.setHeader("X-Rotator-Provider-Mode", "limited-web");
+  res.setHeader("Cache-Control", "no-store");
+  const result = await completeViaRotator(req, res, rotator, body, "none", {
+    callType: "image_generation", apiKeyHash: auth.key?.tokenHash || (auth.rawKey ? hashKey(auth.rawKey) : null),
+    requesterIp: req.socket?.remoteAddress || null, rawRequest: parsed,
+  });
+  if (result.status !== 200) {
+    const retrySec = extractRetryAfterSeconds(result.errorText);
+    return writeJson(res, result.status, {
+      error: { type: result.status === 429 ? "rate_limit_error" : "upstream_error", message: result.errorText || "Image generation failed" },
+    }, retrySec ? { "Retry-After": String(retrySec) } : {});
+  }
+  const images = result.completion.images;
+  if (result.completion.streamError || !images || images.length !== 1) {
+    return writeJson(res, 502, { error: { type: "upstream_error", message: "Gemini Web returned no complete generated image" } });
+  }
+  writeJson(res, 200, {
+    created: Math.floor(Date.now() / 1000),
+    output_format: images[0].mimeType.slice("image/".length),
+    data: images.map((image) => ({ b64_json: image.data })),
+  });
 }
 
 export async function handleOpenAIChatCompletions(
@@ -3157,6 +3248,70 @@ export async function handleOpenAIChatCompletions(
   }, rotatorHeaders);
 }
 
+/** Image tool results are buffered until download and cookie persistence succeed. */
+async function serveWebResponseImages(
+  req: IncomingMessage, res: ServerResponse, rotator: AccountRotator,
+  request: OpenAIResponsesRequest, mode: WebImageMode | "text", apiKeyHash: string | null,
+): Promise<void> {
+  let converted: ResponsesConversionResult;
+  try { converted = convertResponsesToChatRequest({ ...request, tools: [], tool_choice: "none" }); }
+  catch { return writeJson(res, 400, { error: { type: "invalid_request_error", message: "Invalid responses input or previous_response_id" } }); }
+  const body = openAIToAntigravityBody(converted.chatRequest);
+  body.providerId = GEMINI_WEB_PROVIDER;
+  if (mode !== "text") body.requestType = mode === "image" ? "image-generation" : mode;
+  if (mode === "image" && isRecord(body.request)) {
+    const existing = isRecord(body.request.systemInstruction) ? body.request.systemInstruction : {};
+    body.request.systemInstruction = { parts: [
+      ...(Array.isArray(existing.parts) ? existing.parts : []),
+      { text: "Use image generation to create one image requested by the user." },
+    ] };
+  }
+  const createdAt = Math.floor(Date.now() / 1000);
+  const responseId = makeCompatId("resp");
+  res.setHeader("Cache-Control", "no-store");
+  const result = await completeViaRotator(req, res, rotator, body, "none", {
+    callType: "responses", apiKeyHash, requesterIp: req.socket?.remoteAddress || null,
+    // Image bytes stay out of request/response logs, including explicit follow-up uploads.
+    rawRequest: { model: request.model, image_generation: true },
+  });
+  if (result.status !== 200 || result.completion.streamError) {
+    return writeJson(res, result.status === 200 ? 502 : result.status, {
+      error: { type: "upstream_error", message: result.errorText || result.completion.streamError || "Gemini Web image response failed" },
+    });
+  }
+  const response: Record<string, unknown> = { ...buildResponsesResponse(request, responseId, createdAt, result.completion, "completed", converted.previousResponseId), usage: null };
+  if (!request.stream) return writeJson(res, 200, response);
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
+  let sequence = 0;
+  const event = async (payload: Record<string, unknown>): Promise<void> => {
+    if (res.destroyed) throw new Error("Client disconnected");
+    res.write(`event: ${payload.type}\ndata: ${JSON.stringify({ ...payload, sequence_number: sequence++ })}\n\n`);
+    await waitForResponseDrain(res);
+  };
+  const initial = { ...response, status: "in_progress", output: [], output_text: "" };
+  await event({ type: "response.created", response: initial });
+  await event({ type: "response.in_progress", response: initial });
+  const output = response.output as Array<Record<string, unknown>>;
+  for (const [index, item] of output.entries()) {
+    const empty = item.type === "image_generation_call" ? { ...item, status: "in_progress", result: null }
+      : { ...item, status: "in_progress", content: [] };
+    await event({ type: "response.output_item.added", output_index: index, item: empty });
+    const position = { item_id: item.id, output_index: index };
+    if (item.type === "image_generation_call") {
+      await event({ type: "response.image_generation_call.completed", ...position });
+    } else if (item.type === "message") {
+      const part = (item.content as Array<Record<string, unknown>>)[0];
+      await event({ type: "response.content_part.added", ...position, content_index: 0, part: { ...part, text: "" } });
+      await event({ type: "response.output_text.delta", ...position, content_index: 0, delta: part.text });
+      await event({ type: "response.output_text.done", ...position, content_index: 0, text: part.text });
+      await event({ type: "response.content_part.done", ...position, content_index: 0, part });
+    }
+    await event({ type: "response.output_item.done", output_index: index, item });
+  }
+  await event({ type: "response.completed", response });
+  res.end();
+}
+
 export async function handleOpenAIResponsesCreate(
   req: IncomingMessage,
   res: ServerResponse,
@@ -3210,12 +3365,17 @@ export async function handleOpenAIResponsesCreate(
   if (route.providerId === GEMINI_WEB_PROVIDER) {
     res.setHeader("X-Rotator-Usage", "unavailable");
     res.setHeader("X-Rotator-Provider-Mode", "limited-web");
-    const message = webCapabilityError(parsed);
+    const message = webCapabilityError(parsed, "responses");
     if (message) return writeJson(res, 400, { error: { type: "invalid_request_error", message } });
   }
   const routedValidation = autoSelection
     ? { ...validation.value, model: autoSelection.model }
     : { ...validation.value, model: route.modelId ?? requestedModel };
+
+  if (route.providerId === GEMINI_WEB_PROVIDER) {
+    const imageMode = webResponsesImageMode(parsed);
+    if (imageMode) return serveWebResponseImages(req, res, rotator, routedValidation, imageMode, apiKeyHash);
+  }
 
   if (route.providerId === "openai-codex") {
     await serveCodexResponses(req, res, rotator, routedValidation, {
@@ -3535,7 +3695,7 @@ export async function handleAnthropicMessages(
   if (route.providerId === GEMINI_WEB_PROVIDER) {
     res.setHeader("X-Rotator-Usage", "unavailable");
     res.setHeader("X-Rotator-Provider-Mode", "limited-web");
-    const message = webCapabilityError(parsed);
+    const message = webCapabilityError(parsed, "anthropic");
     if (message) return writeJson(res, 400, { type: "error", error: { type: "invalid_request_error", message } });
   }
   const routedValidation = autoSelection

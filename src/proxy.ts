@@ -188,6 +188,7 @@ import {
   handleAnthropicMessages,
   handleGeminiGenerateContent,
   handleOpenAIChatCompletions,
+  handleOpenAIImageGenerations,
   handleOpenAIResponsesCancel,
   handleOpenAIResponsesCreate,
   handleOpenAIResponsesDelete,
@@ -2772,6 +2773,15 @@ export function startProxy(
 
     if (method === "GET" && pathname === "/v1beta/models") {
       serveGeminiModels(res, rotator);
+      return;
+    }
+
+    if (method === "POST" && pathname === "/v1/images/generations") {
+      handleOpenAIImageGenerations(req, res, rotator).catch((err) => {
+        log(`Image generation error: ${err}`, rotator, "error");
+        if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Internal image generation error", type: "server_error" } }));
+      });
       return;
     }
 

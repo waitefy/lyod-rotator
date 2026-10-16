@@ -17,6 +17,7 @@ import {
 } from "../../compat/model-specs.js";
 import { dynamicCatalog } from "./dynamic-catalog.js";
 import { getWebThinkingLevel } from "../gemini-web/credentials.js";
+import { apiWebAttachment } from "../gemini-web/attachments.js";
 import {
   thoughtSignatureCache,
   getStoredResponse,
@@ -89,7 +90,8 @@ export interface ResponseFunctionCallOutputItem {
 
 export type ResponseOutputItem =
   | ResponseMessageOutputItem
-  | ResponseFunctionCallOutputItem;
+  | ResponseFunctionCallOutputItem
+  | { id: string; type: "image_generation_call"; status: "completed"; result: string; output_format: string };
 
 export interface ChatMessage {
   role: "system" | "developer" | "user" | "assistant" | "model" | "tool";
@@ -180,6 +182,7 @@ export interface AnthropicMessagesRequest {
 
 export interface CompatCompletion {
   text: string;
+  images?: { mimeType: string; data: string }[];
   thinkingText?: string; // Gemini thought blocks (thought: true), emitted as reasoning_content
   inputTokens: number;
   outputTokens: number;
@@ -306,12 +309,20 @@ export function dataUrlToInlineData(url: string): AntigravityPart | null {
 
 export function extractParts(
   content: ChatMessage["content"],
+  webAttachments = false,
 ): AntigravityPart[] {
   if (content === null) return [];
   if (typeof content === "string") return content ? [{ text: content }] : [];
   if (!Array.isArray(content)) return [];
   const parts: AntigravityPart[] = [];
   for (const part of content) {
+    if (webAttachments) {
+      const attachment = apiWebAttachment(part);
+      if (attachment) {
+        parts.push({ inlineData: attachment });
+        continue;
+      }
+    }
     if (part.type === "text" && typeof part.text === "string" && part.text) {
       parts.push({ text: part.text });
       continue;
@@ -354,12 +365,15 @@ export function extractParts(
 export function convertOpenAIToolsToGemini(
   tools: OpenAITool[],
   isClaude: boolean = false,
+  preserveSchema: boolean = false,
 ): { functionDeclarations: GeminiFunctionDeclaration[] }[] {
   const decls: GeminiFunctionDeclaration[] = tools
     .filter((t) => t.type === "function" && isNonEmptyString(t.function?.name))
     .map((t) => {
       const sanitized = t.function.parameters
-        ? ((isClaude
+        ? ((preserveSchema
+            ? t.function.parameters
+            : isClaude
             ? sanitizeClaudeViaGeminiSchema(t.function.parameters)
             : sanitizeGeminiSchema(t.function.parameters)) as Record<
             string,
@@ -379,9 +393,14 @@ export function convertOpenAIToolsToGemini(
 
 export function convertToolChoiceToGemini(
   toolChoice: unknown,
+  web = false,
 ): GeminiToolConfig | undefined {
   if (!toolChoice || toolChoice === "none")
     return { functionCallingConfig: { mode: "NONE" } };
+  if (web && toolChoice === "required") return { functionCallingConfig: { mode: "ANY" } };
+  if (web && isRecord(toolChoice) && toolChoice.type === "function" && isNonEmptyString(toolChoice.name)) {
+    return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [toolChoice.name] } };
+  }
   if (toolChoice === "auto" || toolChoice === "required")
     return { functionCallingConfig: { mode: "AUTO" } };
   if (
@@ -549,6 +568,7 @@ export function contentToResponseInputBlocks(
 export function parseResponsesInput(
   input: unknown,
   callIdToName: Map<string, string> = new Map(),
+  preserveToolContent = false,
 ): ParsedResponsesInput {
   if (typeof input === "string") {
     return {
@@ -601,7 +621,8 @@ export function parseResponsesInput(
       });
       messages.push({
         role: "tool",
-        content: outputText,
+        content: preserveToolContent && Array.isArray(rawItem.output)
+          ? normalizeContentBlocks(rawItem.output) : outputText,
         name: toolName,
         tool_call_id: rawItem.call_id,
       });
@@ -617,6 +638,7 @@ export function parseResponsesInput(
         typeof rawItem.arguments === "string"
           ? rawItem.arguments
           : JSON.stringify(rawItem.arguments ?? {});
+      if (preserveToolContent) callIdToName.set(callId, rawItem.name);
       inputItems.push({
         id: makeCompatId("in"),
         type: "function_call",
@@ -776,6 +798,10 @@ export function normalizeOpenAIResponsesRequest(value: unknown): unknown {
     const filtered: unknown[] = [];
     for (const t of value.tools) {
       if (!isRecord(t) || typeof t.type !== "string") continue;
+      if (t.type === "image_generation" && typeof value.model === "string" && getWebThinkingLevel(value.model) !== undefined) {
+        filtered.push(t);
+        continue;
+      }
       if (t.type !== "function") continue;
 
       if (isNonEmptyString(t.name) && !isRecord(t.function)) {
@@ -845,7 +871,7 @@ export function convertResponsesToChatRequest(
     ? (previous.conversationMessages as unknown as ChatMessage[])
     : [];
 
-  const parsed = parseResponsesInput(input.input, previousCallIdToName);
+  const parsed = parseResponsesInput(input.input, previousCallIdToName, getWebThinkingLevel(input.model) !== undefined);
   const conversationMessages = [
     ...previousConversationMessages,
     ...parsed.messages,
@@ -1113,7 +1139,7 @@ export function openAIToAntigravityBody(
           parts.push({
             ...(cachedSig ? { thoughtSignature: cachedSig } : {}),
             functionCall: {
-              ...(isClaude ? { id: tc.id } : {}),
+              ...(isClaude || getWebThinkingLevel(effortTarget) !== undefined ? { id: tc.id } : {}),
               name: tc.function.name,
               args,
             },
@@ -1197,7 +1223,9 @@ export function openAIToAntigravityBody(
         responseData = { output: responseText };
       }
       const toolImages: AntigravityPart[] = [];
-      if (msg.content && Array.isArray(msg.content)) {
+      if (getWebThinkingLevel(effortTarget) !== undefined) {
+        toolImages.push(...extractParts(msg.content, true).filter((part) => "inlineData" in part));
+      } else if (msg.content && Array.isArray(msg.content)) {
         for (const part of msg.content) {
           if (
             part.type === "image_url" &&
@@ -1224,7 +1252,7 @@ export function openAIToAntigravityBody(
 
       const fnResponsePart = {
         functionResponse: {
-          ...(isClaude && toolCallId ? { id: toolCallId } : {}),
+          ...((isClaude || getWebThinkingLevel(effortTarget) !== undefined) && toolCallId ? { id: toolCallId } : {}),
           name: fnName,
           response: responseData,
         },
@@ -1254,7 +1282,7 @@ export function openAIToAntigravityBody(
       }
       if (isClaude && toolCallId) pendingClaudeToolCallIds.delete(toolCallId);
     } else {
-      const msgParts = extractParts(msg.content);
+      const msgParts = extractParts(msg.content, getWebThinkingLevel(effortTarget) !== undefined);
       if (msgParts.length > 0) {
         if (isClaude) pendingClaudeToolCallIds.clear();
         contents.push({ role: "user", parts: msgParts });
@@ -1291,10 +1319,10 @@ export function openAIToAntigravityBody(
   const inputTools = Array.isArray(input.tools)
     ? (input.tools as OpenAITool[])
     : [];
-  const geminiTools = convertOpenAIToolsToGemini(inputTools, isClaude);
+  const geminiTools = convertOpenAIToolsToGemini(inputTools, isClaude, getWebThinkingLevel(effortTarget) !== undefined);
   const geminiToolConfig =
     input.tool_choice !== undefined
-      ? convertToolChoiceToGemini(input.tool_choice)
+      ? convertToolChoiceToGemini(input.tool_choice, getWebThinkingLevel(effortTarget) !== undefined)
       : undefined;
 
   const modelSpec = getModelSpec(effortTarget);
@@ -1457,6 +1485,7 @@ export function convertAnthropicToolsToOpenAI(
 export function convertAnthropicToolChoice(toolChoice: unknown): unknown {
   if (!isRecord(toolChoice)) return toolChoice;
   if (toolChoice.type === "auto") return "auto";
+  if (toolChoice.type === "none") return "none";
   if (toolChoice.type === "any") return "required";
   if (toolChoice.type === "tool" && isNonEmptyString(toolChoice.name)) {
     return { type: "function", function: { name: toolChoice.name } };
@@ -1466,6 +1495,7 @@ export function convertAnthropicToolChoice(toolChoice: unknown): unknown {
 
 export function convertAnthropicMessagesToOpenAI(
   messages: ChatMessage[],
+  preserveToolErrors = false,
 ): ChatMessage[] {
   const result: ChatMessage[] = [];
   for (const msg of messages) {
@@ -1519,7 +1549,9 @@ export function convertAnthropicMessagesToOpenAI(
                 : JSON.stringify(tr.content ?? "");
           result.push({
             role: "tool",
-            content,
+            content: preserveToolErrors && Array.isArray(tr.content)
+              ? [...(tr.is_error === true ? [{ type: "text", text: "Client tool error (action failed):" }] : []), ...tr.content]
+              : preserveToolErrors && tr.is_error === true ? `Client tool error (action failed):\n${content}` : content,
             tool_call_id: tr.tool_use_id as string,
           });
         }
@@ -1548,7 +1580,7 @@ export function anthropicToAntigravityBody(
         : "";
   const tools = convertAnthropicToolsToOpenAI(input.tools);
   const toolChoice = convertAnthropicToolChoice(input.tool_choice);
-  const convertedMessages = convertAnthropicMessagesToOpenAI(input.messages);
+  const convertedMessages = convertAnthropicMessagesToOpenAI(input.messages, getWebThinkingLevel(input.model) !== undefined);
   return openAIToAntigravityBody(
     {
       model: input.model,
@@ -1639,7 +1671,7 @@ export function validateOpenAIChatCompletionRequest(
     : { ok: true, value: value as unknown as OpenAIChatCompletionRequest };
 }
 
-function validateResponsesTools(value: unknown): string[] {
+function validateResponsesTools(value: unknown, allowImages = false): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value))
     return ["body.tools must be an array when provided"];
@@ -1649,7 +1681,7 @@ function validateResponsesTools(value: unknown): string[] {
       errors.push("each tool must be an object");
       continue;
     }
-    if (tool.type !== "function") {
+    if (tool.type !== "function" && !(allowImages && tool.type === "image_generation")) {
       errors.push(`only function tools are supported (got: ${tool.type})`);
     }
   }
@@ -1715,7 +1747,7 @@ export function validateOpenAIResponsesRequest(
       "body.instructions must be a string or content array when provided",
     );
   }
-  errors.push(...validateResponsesTools(value.tools));
+  errors.push(...validateResponsesTools(value.tools, typeof value.model === "string" && getWebThinkingLevel(value.model) !== undefined));
   return errors.length > 0
     ? { ok: false, errors }
     : { ok: true, value: value as unknown as OpenAIResponsesRequest };
@@ -1798,6 +1830,10 @@ export function buildResponsesOutput(completion: CompatCompletion): {
       arguments: toolArgumentsToString(toolCall.function.arguments),
       status: "completed",
     });
+  }
+  for (const image of completion.images ?? []) {
+    output.push({ id: makeCompatId("ig"), type: "image_generation_call", status: "completed",
+      result: image.data, output_format: image.mimeType.slice("image/".length) });
   }
   return { output, outputText: completion.text, callIdToName };
 }
