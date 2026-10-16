@@ -149,8 +149,7 @@ class Session:
                 return
             await task
         except Exception as error:
-            status, message = worker.safe_error(error)
-            send({"type": "error", "status": status, "message": message})
+            send(worker.error_event(error))
         finally:
             for pending in (task, disconnect):
                 if pending and not pending.done():

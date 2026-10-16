@@ -625,3 +625,60 @@ describe("Models switch enforcement at request admission and dispatch", () => {
     assertReleased(accounts);
   });
 });
+
+
+describe("Gemini Web account rotation", () => {
+  const model = "gemini-4-argon-web-medium";
+  function webRotator() {
+    return makeRotator({ accounts: [0, 1].map((index) => ({ email: `web-${++accountSequence}-${index}@example.invalid`,
+      credentials: [{ provider: "gemini-web", cookiesFile: `/tmp/fixture-web-${index}.json` }] })) });
+  }
+
+  it("retries a rejected account with the same Argon level and provider", async () => {
+    const { rotator, accounts } = webRotator();
+    const seen: AccountRuntime[] = [];
+    mock.method(getProviderAdapter("gemini-web"), "forwardRequest", async (account: AccountRuntime, body: RequestBody) => {
+      seen.push(account);
+      assert.equal(body.model, model);
+      if (seen.length === 1) return { endpoint: "mock://gemini-web", response: new Response(
+        JSON.stringify({ error: { message: "RESOURCE_EXHAUSTED: response model rejected" } }),
+        { status: 429, headers: { "Retry-After": "7200" } }) };
+      return successResponse("gemini-web");
+    });
+    const started = Date.now();
+    const outcome = await withRotation(rotator, model, {}, requestBody({ model, providerId: "gemini-web" }), (response) => response.text());
+    assert.equal(outcome.ok, true);
+    assert.equal(seen.length, 2);
+    assert.notEqual(seen[0], seen[1]);
+    assert.ok(seen[0].cooldownsByModel["gemini-web"] >= started + 7200000);
+    assert.equal(captures.length, 0, "no other provider may receive a fallback");
+    assertReleased(accounts);
+  });
+
+  it("stops after all web accounts are rejected", async () => {
+    const { rotator, accounts } = webRotator();
+    const seen: AccountRuntime[] = [];
+    mock.method(getProviderAdapter("gemini-web"), "forwardRequest", async (account: AccountRuntime) => {
+      seen.push(account);
+      return { endpoint: "mock://gemini-web", response: new Response("RESOURCE_EXHAUSTED", { status: 429 }) };
+    });
+    const outcome = await withRotation(rotator, model, {}, requestBody({ model, providerId: "gemini-web" }), async () => {
+      assert.fail("a rejected response must not execute tools");
+    });
+    assert.equal(outcome.ok, false);
+    assert.equal(seen.length, 2);
+    assert.equal(new Set(seen).size, 2);
+    assert.equal(captures.length, 0);
+    assertReleased(accounts);
+  });
+
+  it("lets a reset web account be checked again despite a stale zero quota", async () => {
+    const { rotator, accounts } = webRotator();
+    for (const account of accounts) account.quota = [{ providerId: "gemini-web", modelKey: "gemini-web",
+      displayName: "Gemini App", percentRemaining: 0, resetTime: new Date(Date.now() - 1000).toISOString(), timerType: "5h" }];
+    mock.method(getProviderAdapter("gemini-web"), "forwardRequest", async () => successResponse("gemini-web"));
+    const outcome = await withRotation(rotator, model, {}, requestBody({ model, providerId: "gemini-web" }), (response) => response.text());
+    assert.equal(outcome.ok, true);
+    assertReleased(accounts);
+  });
+});

@@ -10,6 +10,7 @@ import type { AccountConfig } from "../../types.js";
 import { SseEventAccumulator } from "../google-antigravity/forward.js";
 import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODEL, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel, getCookiesFile, validateCredentials } from "./credentials.js";
 import { forwardRequest, runWebWorker } from "./forward.js";
+import { applyWebQuota } from "./quota.js";
 
 async function runLogin(): Promise<AccountConfig> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -61,17 +62,20 @@ export const geminiWebAdapter: ProviderAdapter = {
   ensureValidToken: async () => undefined,
   // Authentication stays inside the worker; never send cookies as an API bearer.
   getAuthHeader: () => "",
-  shouldRetryOnQuotaExhaustion: () => false,
-  async fetchQuota(account) {
-    // Gemini App exposes no dependable API quota/usage counts. Keep them unknown.
+  shouldRetryOnQuotaExhaustion: () => true,
+  async fetchQuota(account, ctx) {
     account.lastQuotaPoll = Date.now();
     account.lastPollByProvider ??= {};
     try {
       const { response } = await runWebWorker({ mode: "probe", cookiesFile: getCookiesFile(account.config),
         proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER) }, AbortSignal.timeout(90000));
+      if (response.ok) {
+        const data: unknown = await response.json();
+        applyWebQuota(account, data, ctx);
+        return;
+      }
       await response.text();
-      account.lastPollByProvider[GEMINI_WEB_PROVIDER] = response.ok ? "Session connected; background refresh active; quota unavailable"
-        : response.status === 401 ? "Reconnect Gemini App: session expired or rejected"
+      account.lastPollByProvider[GEMINI_WEB_PROVIDER] = response.status === 401 ? "Reconnect Gemini App: session expired or rejected"
         : response.status === 404 ? "Gemini App connected but Argon unavailable" : `Session check failed (${response.status}); quota unavailable`;
     } catch {
       account.lastPollByProvider[GEMINI_WEB_PROVIDER] = "Session check deferred or service unavailable; quota unavailable";

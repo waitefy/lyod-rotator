@@ -279,9 +279,11 @@ class ProcessTest(unittest.TestCase):
 from pathlib import Path
 from types import SimpleNamespace
 from .utils import save_cookies
+from gemini_web_worker_test import Client as WireClient, model as wire_model
 def set_log_level(level): pass
-class GeminiClient:
+class GeminiClient(WireClient):
  def __init__(self,*args,**kwargs):
+  super().__init__([wire_model('argon')], ['fixture answer'])
   self.task=None
   path=Path(os.environ['GEMINI_COOKIE_PATH'])/'fixture-state.json'
   self.cookies=json.loads(path.read_text()) if path.exists() else {'ticks':0}
@@ -295,9 +297,6 @@ class GeminiClient:
    await asyncio.sleep(.02)
    self.cookies['ticks']+=1
    save_cookies(self.cookies)
- def list_models(self): return [SimpleNamespace(model_name='argon',display_name='Argon',aliases=[],is_available=True)]
- async def generate_content_stream(self,*args,**kwargs):
-  yield SimpleNamespace(text_delta='fixture answer')
  async def close(self):
   if self.task:
    self.task.cancel()
@@ -316,7 +315,7 @@ def save_cookies(cookies,**kwargs):
             cookies.write_text(json.dumps({"__Secure-1PSID": "fixture"}))
             payload = {"mode": "generate", "cookiesFile": str(cookies), "prompt": "hello"}
             _, cache, socket = session.session_paths(payload)
-            environment = dict(os.environ, PYTHONPATH=str(root))
+            environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(root), str(Path(__file__).parent)]))
             worker_path = Path(__file__).parents[1] / "src/providers/gemini-web/worker.py"
             def call():
                 response = subprocess.run([sys.executable, str(worker_path)], input=json.dumps(payload).encode(),

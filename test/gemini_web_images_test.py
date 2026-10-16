@@ -105,20 +105,25 @@ class ImageOutputTest(unittest.IsolatedAsyncioTestCase):
             cookies.write_text('{"__Secure-1PSID":"fixture"}')
             class ImageClient(Client):
                 async def generate_content_stream(self, prompt, **kwargs):
+                    await self.read_generation()
                     for _ in range(3):
                         yield SimpleNamespace(text_delta="description", chosen=1, candidates=[
                             SimpleNamespace(generated_images=[SimpleNamespace(url="https://evil.test/wrong-candidate")]),
                             SimpleNamespace(generated_images=[SimpleNamespace(url=URL)], web_images=[SimpleNamespace(url="https://evil.test/search")]),
                         ])
             client = ImageClient([model("argon")], [])
-            client.client = Transport([(200, {}, [PNG])])
+            downloads = Transport([(200, {}, [PNG])])
+            class ImageTransport:
+                def stream(self, method, url, **kwargs):
+                    return client.http_stream() if method == "POST" else downloads.stream(method, url, **kwargs)
+            client.client = ImageTransport()
             events = []
             await worker.run({"mode": "generate", "output": "image", "cookiesFile": str(cookies), "prompt": "Draw"},
                              lambda *args, **kwargs: client, emit_event=events.append)
             self.assertEqual([e["type"] for e in events], ["ready", "image", "done"])
             self.assertEqual(base64.b64decode(events[1]["data"]), PNG)
-            self.assertEqual(len(client.client.calls), 1)
-            self.assertEqual(client.client.calls[0][1], URL + "=s2048-rj")
+            self.assertEqual(len(downloads.calls), 1)
+            self.assertEqual(downloads.calls[0][1], URL + "=s2048-rj")
             self.assertTrue(client.closed)
 
     async def test_search_images_and_text_refusals_do_not_count_as_generated_output(self):

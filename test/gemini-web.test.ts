@@ -371,7 +371,7 @@ for event in events: print(json.dumps(event),flush=True)`, async () => {
         assert.equal(code, status);
         assert.equal(updated.length, status === 200 ? 1 : 0);
         assert.doesNotMatch(text, /private-fixture/);
-        const account = { config: { email: "fixture", credentials: [{ provider: "gemini-web", cookiesFile }] } } as AccountRuntime;
+        const account = { quota: [], config: { email: "fixture", credentials: [{ provider: "gemini-web", cookiesFile }] } } as unknown as AccountRuntime;
         await geminiWebAdapter.fetchQuota(account, {} as never);
         const message = account.lastPollByProvider?.["gemini-web"];
         assert.match(message ?? "", status === 200 ? /background refresh active/ : status === 401 ? /Reconnect/ : /Argon unavailable/);
@@ -406,6 +406,26 @@ print(json.dumps({'type':'error','status':${status},'message':'safe failure'}), 
         assert.equal(response.status, status);
         assert.match(await response.text(), /safe failure/);
         if (status === 429) assert.equal(response.headers.get("retry-after"), "60");
+      });
+    }
+  });
+
+  it("returns bounded quota metrics from probes and preserves the quota reset delay", async () => {
+    await fakePython(`import json,sys
+json.load(sys.stdin)
+print(json.dumps({'type':'ready'}),flush=True)
+print(json.dumps({'type':'done','usage':{'current_5h':{'usage_level':1,'remaining_credits':0}}}),flush=True)`, async () => {
+      const { response } = await runWebWorker({ mode: "probe" });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { usage: { current_5h: { usage_level: 1, remaining_credits: 0 } } });
+    });
+    for (const [value, expected] of [[7200, "7200"], [-1, "60"], [604801, "60"], ["PRIVATE", "60"]]) {
+      await fakePython(`import json,sys
+json.load(sys.stdin)
+print(json.dumps({'type':'error','status':429,'message':'RESOURCE_EXHAUSTED','retryAfterSeconds':${JSON.stringify(value)}}),flush=True)`, async () => {
+        const { response } = await runWebWorker({});
+        assert.equal(response.status, 429);
+        assert.equal(response.headers.get("retry-after"), expected);
       });
     }
   });

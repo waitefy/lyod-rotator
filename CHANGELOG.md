@@ -1,3 +1,10 @@
+## [4.2.0-argon.3]
+
+- Verify Google's served-model ID against the discovered Argon ID before releasing text, images or tool calls. Discard model mismatches and reject unverifiable responses. Buffer the bounded upstream response until verification completes.
+- Refresh and display 5-hour and weekly compute budgets. Pause exhausted Gemini Web accounts until reset, respect Retry-After and retry another eligible web account with the same Argon level.
+- Preserve the Gemini Web pool's cooldown instead of resolving it to the unrelated Google Gemini pool. Allow expired quota snapshots to be checked again and stop retries when no eligible account remains.
+- Cover model mismatches, missing identity, UTF-16 wire framing, quota resets and account rotation with regression tests. Verify a real isolated Medium request against Google's response metadata.
+
 ## [4.2.0-argon.2]
 
 - Support client function tools with arbitrary names and validated schemas through Chat Completions, Responses, Anthropic Messages and native Gemini requests. Keep execution and permissions in the client.

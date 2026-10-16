@@ -4,9 +4,11 @@ import asyncio
 import base64
 import binascii
 import contextlib
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +28,7 @@ ATTACHMENT_EXTENSIONS = {
 }
 # JSON escaping can expand one input byte into six (e.g. control characters).
 MAX_INPUT_BYTES = MAX_PROMPT_BYTES * 6 + 4 * ((MAX_TOTAL_ATTACHMENT_BYTES + 2) // 3) + 65_536
+MAX_UPSTREAM_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_CHARS = 128_000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_EVENT_BYTES = max(MAX_OUTPUT_CHARS * 6, 4 * ((MAX_IMAGE_BYTES + 2) // 3)) + 4096
@@ -35,6 +38,7 @@ ARGON_NAME = re.compile(r"(?:\bgemini[\s_-]*4[\s_-]*argon\b|^argon$)", re.I)
 # Low / Medium / High are STANDARD / MEDIUM / EXTENDED, not 1 / 2 / 3.
 THINKING_LEVELS = {"low": 1, "medium": 4, "high": 2}
 MODEL_HEADER = "x-goog-ext-525001261-jspb"
+GENERATE_ENDPOINT = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 
 
 class ThinkingTransport:
@@ -80,9 +84,178 @@ def thinking_transport(client, level):
 
 
 class WorkerError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, retry_after=None):
         self.status = status
         self.message = message
+        self.retry_after = retry_after
+
+
+def response_model_ids(raw):
+    """Read only inner[39] from Google's length-prefixed JSON envelopes.
+
+    Lengths are JavaScript UTF-16 code units, not bytes. Never search arbitrary
+    response text for model names: user content can contain those same strings.
+    """
+    text = raw.decode("utf-8")
+    if text.startswith(")]}'"):
+        text = text[4:]
+    decoder, ids = json.JSONDecoder(), []
+    position = 0
+    while position < len(text):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text):
+            break
+        end = text.index("\n", position)
+        marker = text[position:end].strip()
+        if not marker.isascii() or not marker.isdecimal():
+            raise ValueError()
+        # The delimiter newline belongs to the declared frame length, as
+        # does trailing whitespace. Match the pinned StreamingFrameParser.
+        start, position, units = end, end, 0
+        expected = int(marker)
+        while position < len(text) and units < expected:
+            units += 2 if ord(text[position]) > 0xFFFF else 1
+            position += 1
+        if units != expected:
+            raise ValueError()
+        envelope = decoder.decode(text[start:position])
+        if not isinstance(envelope, list):
+            raise ValueError()
+        for part in envelope:
+            if not isinstance(part, list) or len(part) < 3 or part[0] != "wrb.fr" or not isinstance(part[2], str):
+                continue
+            inner = json.loads(part[2])
+            if isinstance(inner, list) and len(inner) > 39 and inner[39] is not None:
+                if not isinstance(inner[39], str) or not inner[39]:
+                    raise ValueError()
+                ids.append(inner[39])
+    return ids
+
+
+class ModelGuard:
+    """Buffer the bounded wire response before the library can emit any text.
+
+    Google may put the served model in the final frame. Checking just the first
+    delta would allow an HTTP-200 downgrade to escape, including tool calls.
+    """
+    def __init__(self, expected):
+        if not isinstance(expected, str) or not expected:
+            raise WorkerError(502, "Gemini Web Argon model identifier is unavailable")
+        self.expected, self.verified, self.error = expected, False, None
+
+    def check(self):
+        if self.error:
+            raise self.error
+        if self.verified and (self.client.client is not self.original or self.original.stream is not self.stream):
+            raise WorkerError(502, "Gemini Web generation transport changed; response discarded")
+        if not self.verified:
+            raise WorkerError(502, "Gemini Web response model could not be verified; response discarded")
+
+    def inspect(self, raw):
+        try:
+            ids = response_model_ids(raw)
+            if not ids:
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            self.error = WorkerError(502, "Gemini Web response model could not be verified; response discarded")
+        else:
+            if any(model_id != self.expected for model_id in ids):
+                self.error = WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: Google returned a different model; response discarded", 60)
+            else:
+                self.verified = True
+
+    @contextlib.contextmanager
+    def transport(self, client):
+        original = client.client
+        original_stream = original.stream
+        guard = self
+
+        class Response:
+            def __init__(self, response):
+                self.response = response
+
+            def __getattr__(self, name):
+                return getattr(self.response, name)
+
+            async def aiter_content(self, *args, **kwargs):
+                raw = bytearray()
+                async for chunk in self.response.aiter_content(*args, **kwargs):
+                    if len(raw) + len(chunk) > MAX_UPSTREAM_BYTES:
+                        guard.error = WorkerError(502, "Gemini Web response exceeds the verification limit")
+                        raise guard.error
+                    raw.extend(chunk)
+                guard.inspect(raw)
+                # Let the library handle explicit quota/auth/protocol errors.
+                # consume_stream checks the guard before emitting even ready.
+                yield bytes(raw)
+
+        @contextlib.asynccontextmanager
+        async def stream(method, url, **kwargs):
+            generate = method == "POST" and str(url) == GENERATE_ENDPOINT
+            if generate:
+                if guard.error:
+                    raise guard.error
+                guard.verified = False
+            async with original_stream(method, url, **kwargs) as response:
+                yield Response(response) if generate and response.status_code == 200 else response
+
+        self.client, self.original, self.stream = client, original, stream
+        original.stream = stream
+        try:
+            yield self
+        finally:
+            original.stream = original_stream
+
+
+def usage_snapshot(client):
+    """Expose only quota metrics; never pass arbitrary library metadata to TS."""
+    source = getattr(client, "usage_info", None)
+    result = {}
+    if not isinstance(source, dict):
+        return result
+    for key in ("current_5h", "weekly"):
+        window = source.get(key)
+        if not isinstance(window, dict):
+            continue
+        row = {}
+        for field in ("remaining_credits", "usage_level"):
+            value = window.get(field)
+            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                row[field] = value
+        reset = window.get("reset_at")
+        if isinstance(reset, str):
+            try:
+                date = datetime.fromisoformat(reset)
+                if date.tzinfo is not None:
+                    row["reset_at"] = date.isoformat()
+            except ValueError:
+                pass
+        if row:
+            result[key] = row
+    return result
+
+
+def exhausted_retry_after(usage):
+    waits = []
+    now = datetime.now(timezone.utc)
+    for window in usage.values():
+        if window.get("remaining_credits", 1) > 0 and window.get("usage_level", 0) < 1:
+            continue
+        reset = window.get("reset_at")
+        seconds = (datetime.fromisoformat(reset) - now).total_seconds() if reset else 60
+        if seconds > 0:
+            waits.append(min(604800, max(1, math.ceil(seconds))))
+    return max(waits, default=None)
+
+
+def error_event(error):
+    status, message = safe_error(error)
+    event = {"type": "error", "status": status, "message": message}
+    retry = getattr(error, "retry_after", None)
+    if status == 429 and type(retry) is int and 1 <= retry <= 604800:
+        event["retryAfterSeconds"] = retry
+    return event
 
 
 def emit(event):
@@ -185,13 +358,28 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
             if getattr(getattr(client, "account_status", None), "name", None) == "UNAUTHENTICATED":
                 raise WorkerError(401, "Gemini Web session expired or was rejected; reconnect it")
             model = select_argon(client.list_models())
+            # init() is a no-op for a persistent client; refresh its budget too.
+            refresh_usage = getattr(client, "_fetch_usage_info", None)
+            if callable(refresh_usage):
+                await refresh_usage()
+            usage = usage_snapshot(client)
             if mode == "probe":
                 emit_event({"type": "ready"})
-                completed = {"type": "done"}
+                completed = {"type": "done", "usage": usage}
             else:
                 # Validate upstream before sending HTTP 200 to the downstream client.
+                retry_after = exhausted_retry_after(usage)
+                if retry_after is not None:
+                    raise WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: account usage limit reached", retry_after)
+                guard = ModelGuard(getattr(model, "model_id", None))
                 with thinking_transport(client, level) if level is not None else contextlib.nullcontext():
-                    completed = await generate(client, payload, model, emit_event, attachments)
+                    with guard.transport(client):
+                        try:
+                            completed = await generate(client, payload, model, emit_event, attachments, guard)
+                        except Exception as error:
+                            if guard.error and type(error).__name__ not in ("UsageLimitExceededError", "AuthError", "ModelInvalidError"):
+                                raise guard.error from None
+                            raise
         finally:
             if not keep_open:
                 with contextlib.suppress(Exception):
@@ -201,7 +389,7 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
     emit_event(completed)
 
 
-async def generate(client, payload, model, emit_event, attachments=()):
+async def generate(client, payload, model, emit_event, attachments=(), guard=None):
     with contextlib.ExitStack() as cleanup:
         kwargs = {}
         if attachments:
@@ -213,16 +401,18 @@ async def generate(client, payload, model, emit_event, attachments=()):
                 path.chmod(0o600)
                 files.append(path)
             kwargs["files"] = files
-        return await consume_stream(client, payload, model, emit_event, kwargs)
+        return await consume_stream(client, payload, model, emit_event, kwargs, guard)
 
 
-async def consume_stream(client, payload, model, emit_event, kwargs):
+async def consume_stream(client, payload, model, emit_event, kwargs, guard=None):
     image_mode = payload.get("output") in ("image", "image-or-text")
     image = None
     async with contextlib.aclosing(
         client.generate_content_stream(payload["prompt"], model=model, temporary=True, **kwargs)
     ) as stream:
         first = await anext(stream, None)
+        if guard is not None:
+            guard.check()
         if first is None:
             raise WorkerError(502, "Gemini Web returned no response")
         emit_event({"type": "ready"})
@@ -231,6 +421,8 @@ async def consume_stream(client, payload, model, emit_event, kwargs):
 
         def send(output):
             nonlocal count, truncated, image
+            if guard is not None:
+                guard.check()
             if image_mode:
                 candidates = getattr(output, "candidates", [])
                 chosen = getattr(output, "chosen", 0)
@@ -254,6 +446,8 @@ async def consume_stream(client, payload, model, emit_event, kwargs):
                 send(output)
                 if truncated:
                     break
+    if guard is not None:
+        guard.check()
     if image_mode and image is None and payload.get("output") == "image":
         raise WorkerError(502, "Gemini Web returned no generated image; the request may have been refused")
     if image_mode and image is not None:
@@ -346,8 +540,7 @@ def main():
         from session import request
         asyncio.run(request(payload))
     except Exception as error:
-        status, message = safe_error(error)
-        emit({"type": "error", "status": status, "message": message})
+        emit(error_event(error))
         return 1
     return 0
 

@@ -1215,6 +1215,9 @@ export class AccountRotator {
       if (windows.length > 0) return Math.min(...windows.map((quota) => quota.percentRemaining));
     }
     if (!q) return -1;
+    // Gemini Web windows are refreshed best-effort. Let a reset account be
+    // checked by the worker rather than keeping a stale zero indefinitely.
+    if (q.providerId === "gemini-web" && q.resetTime && Date.parse(q.resetTime) <= Date.now()) return -1;
     // Legacy Ollama state used a session pool gated by a weekly pool. Keep
     // that compatibility rule only for old in-memory state; current Ollama
     // accounts expose one monthly pool and need no secondary gate.
@@ -4099,6 +4102,8 @@ export class AccountRotator {
   }
 
   private resolveQuotaStateKey(modelKey: string): string {
+    // The generic Gemini family resolver also matches this provider's pool.
+    if (modelKey === "gemini-web") return modelKey;
     return dynamicCatalog.resolveQuotaPool(modelKey) ??
       resolveQuotaModelKey(modelKey) ??
       modelKey;

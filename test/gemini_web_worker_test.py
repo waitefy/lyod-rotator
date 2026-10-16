@@ -1,5 +1,6 @@
 """Contract tests using an in-memory Gemini App, without browser credentials."""
 import asyncio
+from datetime import datetime, timedelta, timezone
 import contextlib
 import fcntl
 import hashlib
@@ -20,7 +21,7 @@ spec.loader.exec_module(worker)
 
 
 def model(name, available=True):
-    return SimpleNamespace(model_name=name, display_name=name, aliases=[], is_available=available)
+    return SimpleNamespace(model_name=name, display_name=name, aliases=[], is_available=available, model_id="95a4c0abcba24364")
 
 
 class Client:
@@ -28,6 +29,30 @@ class Client:
         self.models, self.deltas = models, deltas
         self.generated = False
         self.closed = False
+        self.served_model_id = "95a4c0abcba24364"
+        self.usage_info = {}
+        self.raw_response = None
+        self.client = SimpleNamespace(stream=self.http_stream)
+
+    @contextlib.asynccontextmanager
+    async def http_stream(self, *args, **kwargs):
+        async def content():
+            inner = [None] * 43
+            inner[39] = self.served_model_id
+            inner[42] = "4 Argon"  # A name alone must not pass identity verification.
+            envelope = json.dumps([["wrb.fr", None, json.dumps(inner)]], ensure_ascii=False)
+            # Google counts both surrounding newlines in the UTF-16 length.
+            raw = (")]}'\n" + str(len(envelope.encode("utf-16-le")) // 2 + 2) + "\n" + envelope + "\n").encode()
+            if self.raw_response is not None:
+                raw = self.raw_response
+            for offset in range(0, len(raw), 7):
+                yield raw[offset:offset + 7]
+        yield SimpleNamespace(status_code=200, aiter_content=content)
+
+    async def read_generation(self):
+        async with self.client.stream("POST", "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate") as response:
+            async for _ in response.aiter_content():
+                pass
 
     async def init(self, **kwargs):
         pass
@@ -38,6 +63,7 @@ class Client:
     async def generate_content_stream(self, prompt, *, model, temporary):
         self.generated = True
         self.selection, self.temporary, self.prompt = model, temporary, prompt
+        await self.read_generation()
         cumulative = ""
         for delta in self.deltas:
             cumulative += delta
@@ -80,6 +106,91 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(caught.exception.status, 404)
             self.assertFalse(client.generated)
             self.assertTrue(client.closed)
+
+    def test_exhausted_five_hour_or_weekly_budget_never_generates(self):
+        for window in ("current_5h", "weekly"):
+            client = Client([model("argon")], ["must not generate"])
+            client.usage_info = {window: {"remaining_credits": 0, "usage_level": 1,
+                "reset_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()}}
+            with self.assertRaises(worker.WorkerError) as caught:
+                self.run_client(client)
+            self.assertEqual(caught.exception.status, 429)
+            self.assertIn("RESOURCE_EXHAUSTED", caught.exception.message)
+            self.assertFalse(client.generated)
+            self.assertTrue(client.closed)
+
+    def test_wrong_or_missing_server_model_is_rejected_before_any_event(self):
+        for served, status in (("8c46e95b1a07cecc", 429), (None, 502), ([], 502)):
+            client = Client([model("argon")], ["must not escape"])
+            client.served_model_id = served
+            events = []
+            with self.assertRaises(worker.WorkerError) as caught:
+                asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+            self.assertEqual(caught.exception.status, status)
+            self.assertEqual(events, [])
+            self.assertTrue(client.closed)
+
+    def test_wire_guard_checks_final_frames_not_names_or_user_text(self):
+        def frame(identity, user_text=""):
+            inner = [None] * 43
+            inner[0], inner[39], inner[42] = user_text, identity, "4 Argon"
+            envelope = json.dumps([["wrb.fr", None, json.dumps(inner, ensure_ascii=False)]], ensure_ascii=False)
+            return (str(len(envelope.encode("utf-16-le")) // 2 + 2) + "\n" + envelope + "\n").encode()
+        valid = frame("95a4c0abcba24364", "Я🌍")
+        cases = [(valid + frame("8c46e95b1a07cecc"), 429),
+                 (frame(None, "95a4c0abcba24364 4 Argon"), 502),
+                 (b"999999\n" + valid.split(b"\n", 1)[1], 502),
+                 (valid[:-2], 502)]
+        for raw, status in cases:
+            client = Client([model("argon")], ["tool call must not escape"])
+            client.raw_response = b")]}'\n" + raw
+            original = client.client.stream
+            events = []
+            with self.assertRaises(worker.WorkerError) as caught:
+                asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+            self.assertEqual(caught.exception.status, status)
+            self.assertEqual(events, [])
+            self.assertEqual(client.client.stream, original)
+        client = Client([model("argon")], ["Unicode frame accepted"])
+        client.raw_response = b")]}'\n" + valid + valid
+        self.assertEqual(self.run_client(client)[1]["text"], "Unicode frame accepted")
+
+    def test_wire_guard_bounds_buffer_without_leaking_or_succeeding(self):
+        client = Client([model("argon")], ["must not escape"])
+        events = []
+        with patch.object(worker, "MAX_UPSTREAM_BYTES", 16), self.assertRaises(worker.WorkerError) as caught:
+            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(events, [])
+        self.assertTrue(client.closed)
+
+    def test_probe_refreshes_usage_and_only_exports_whitelisted_metrics(self):
+        client = Client([model("argon")], [])
+        async def refresh():
+            client.usage_info = {"private": "SECRET", "current_5h": {"remaining_credits": 0,
+                "usage_level": 1, "reset_at": "2026-10-20T20:00:00+00:00", "private": "SECRET"}}
+        client._fetch_usage_info = refresh
+        events = self.run_client(client, {**self.payload, "mode": "probe"})
+        self.assertEqual(events[-1]["usage"], {"current_5h": {"remaining_credits": 0,
+            "usage_level": 1, "reset_at": "2026-10-20T20:00:00+00:00"}})
+        self.assertNotIn("SECRET", json.dumps(events))
+        self.assertFalse(client.generated)
+
+    def test_expired_budget_and_rounded_usage_do_not_permanently_block_generation(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        for quota in ({"usage_level": .999, "remaining_credits": 1, "reset_at": future},
+                      {"usage_level": 1, "remaining_credits": 0, "reset_at": past}):
+            client = Client([model("argon")], ["OK"])
+            client.usage_info = {"current_5h": quota}
+            self.assertEqual(self.run_client(client)[1]["text"], "OK")
+
+    def test_error_event_only_includes_bounded_retry_after_for_quota(self):
+        for retry, expected in ((7200, 7200), (None, None), (-1, None), (604801, None), ("SECRET", None)):
+            event = worker.error_event(worker.WorkerError(429, "safe", retry))
+            self.assertEqual(event.get("retryAfterSeconds"), expected)
+            self.assertNotIn("SECRET", json.dumps(event))
+        self.assertNotIn("retryAfterSeconds", worker.error_event(worker.WorkerError(502, "safe", 60)))
 
     def test_probe_makes_no_generation_request(self):
         client = Client([model("argon")], [])

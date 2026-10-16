@@ -179,11 +179,11 @@ export function buildWebPrompt(body: RequestBody): string {
   return buildWebInput(body).prompt;
 }
 
-function failure(status: number, message: string): ForwardedResponse {
+function failure(status: number, message: string, retryAfterSeconds = 60): ForwardedResponse {
   return {
     endpoint: ENDPOINT,
     response: new Response(JSON.stringify({ error: { message, code: "gemini_web_error" } }), {
-      status, headers: { "Content-Type": "application/json", ...(status === 429 ? { "Retry-After": "60" } : {}) },
+      status, headers: { "Content-Type": "application/json", ...(status === 429 ? { "Retry-After": String(retryAfterSeconds) } : {}) },
     }),
   };
 }
@@ -220,13 +220,13 @@ export function runWebWorker(
         headers: { "Content-Type": "text/event-stream", "X-Rotator-Usage": "unavailable", "X-Rotator-Provider-Mode": "limited-web" },
       }) });
     };
-    const fail = (status: number, message: string, retryToolCall = false): void => {
+    const fail = (status: number, message: string, retryToolCall = false, retryAfterSeconds = 60): void => {
       if (done) return;
       done = true;
       cleanup();
       stop();
       if (settled) output.destroy(new Error(message));
-      else { settled = true; output.destroy(); resolve({ ...failure(status, message), retryToolCall }); }
+      else { settled = true; output.destroy(); resolve({ ...failure(status, message, retryAfterSeconds), retryToolCall }); }
     };
     const abort = (): void => {
       if (done) return;
@@ -253,11 +253,13 @@ export function runWebWorker(
         if (event.type === "error") {
           const status = typeof event.status === "number" && [400, 401, 403, 404, 409, 429, 502, 503, 504].includes(event.status) ? event.status : 502;
           // Only our worker's fixed, non-secret messages cross this boundary.
-          fail(status, typeof event.message === "string" ? event.message : "Gemini Web request failed");
+          const retry = typeof event.retryAfterSeconds === "number" && Number.isInteger(event.retryAfterSeconds)
+            && event.retryAfterSeconds >= 1 && event.retryAfterSeconds <= 604800 ? event.retryAfterSeconds : 60;
+          fail(status, typeof event.message === "string" ? event.message : "Gemini Web request failed", false, retry);
         } else if (event.type === "ready" && !ready) {
           ready = true;
           // Tool output is already buffered: validate it before committing HTTP 200.
-          if (!bridge && !imageMode) startResponse();
+          if (!bridge && !imageMode && payload.mode !== "probe") startResponse();
         } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
           image = validateGeneratedWebImage(event);
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
@@ -272,6 +274,13 @@ export function runWebWorker(
             output.once("drain", () => child.stdout.resume());
           }
         } else if (event.type === "done" && ready) {
+          if (payload.mode === "probe") {
+            done = settled = true;
+            cleanup();
+            output.destroy();
+            resolve({ endpoint: ENDPOINT, response: Response.json({ usage: event.usage ?? {} }) });
+            return;
+          }
           if (imageMode) {
             if ((!image && (payload.output === "image" || !buffered.trim())) || event.truncated || bridge) { fail(502, "Gemini Web returned no complete generated image"); return; }
             startResponse();
