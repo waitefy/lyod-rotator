@@ -446,8 +446,7 @@ async def generate(client, payload, model, emit_event, attachments=(), guard=Non
 async def consume_stream(client, payload, model, emit_event, kwargs, guard=None):
     image_mode = payload.get("output") in ("image", "image-or-text")
     image = None
-    attachments = payload.get("attachments", [])
-    citations = CitationText(single_image=len(attachments) == 1 and attachments[0]["mimeType"].startswith("image/"))
+    citations = CitationText()
     emitted_chars = 0
     async with contextlib.aclosing(
         client.generate_content_stream(payload["prompt"], model=model, temporary=True, **kwargs)

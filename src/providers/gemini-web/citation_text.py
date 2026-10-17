@@ -12,7 +12,7 @@ _TOKENS = re.compile(
 _TOOL_CALL = re.compile(r"^\s*ROTATOR_TOOL_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\{")
 
 
-def render_citations(text, citations, *, single_image=False):
+def render_citations(text, citations):
     if _TOOL_CALL.match(text):
         return text
     sources = {}
@@ -41,14 +41,9 @@ def render_citations(text, citations, *, single_image=False):
         if match.group("code") is not None:
             return match.group()
         numbers = [int(number.strip()) for number in match.group("ids").split(",")]
-        if all(number in sources for number in numbers):
-            return " ".join(sources[number] for number in dict.fromkeys(numbers))
-        # An unresolvable reference adds nothing to a one-image description.
-        # The numeric marker is not a reliable attachment index. Keep source
-        # metadata authoritative; never invent a URL for a missing source.
-        if single_image and not citations:
-            return ""
-        return match.group()
+        # Only source metadata can resolve a marker; attachment counts and
+        # numeric indexes cannot. Keep valid links and omit unresolved entries.
+        return " ".join(sources[number] for number in dict.fromkeys(numbers) if number in sources)
 
     return _TOKENS.sub(replace, text)
 
@@ -56,8 +51,7 @@ def render_citations(text, citations, *, single_image=False):
 class CitationText:
     """Keep ordinary deltas streaming; hold a possible marker for late metadata."""
 
-    def __init__(self, *, single_image=False):
-        self.single_image = single_image
+    def __init__(self):
         self.raw = ""
         self.emitted = 0
         self.held = False
@@ -80,5 +74,5 @@ class CitationText:
         return text
 
     def finish(self):
-        rendered = render_citations(self.raw, list(self.citations.values()), single_image=self.single_image)
+        rendered = render_citations(self.raw, list(self.citations.values()))
         return rendered[self.emitted:]

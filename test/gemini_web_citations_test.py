@@ -10,32 +10,28 @@ from citation_text import CitationText, render_citations
 
 
 class CitationTest(unittest.TestCase):
-    def test_single_image_dead_reference_is_removed(self):
-        for marker in ("[cite: 1]", "[cite: 2]", "[cite: 27]", "[cite: 1, 2]"):
+    def test_unresolved_references_are_removed_without_attachment_assumptions(self):
+        for marker in ("[cite: 1]", "[cite: 2]", "[cite: 3]", "[cite: 27]", "[cite: 1, 2]"):
             with self.subTest(marker=marker):
-                self.assertEqual(render_citations(f"Красное сердце{marker}.", [], single_image=True), "Красное сердце.")
-
-    def test_unknown_sources_and_multiple_images_are_not_guessed(self):
-        self.assertEqual(render_citations("Сравнение[cite: 2].", [], single_image=False), "Сравнение[cite: 2].")
-        self.assertEqual(render_citations("Источник[cite: 1].", []), "Источник[cite: 1].")
+                self.assertEqual(render_citations(f"Красное сердце{marker}.", []), "Красное сердце.")
 
     def test_web_sources_survive_an_image_request(self):
         sources = [SimpleNamespace(id=1, title="Reference [page]", url="https://example.org/a(b)?q=1")]
-        self.assertEqual(render_citations("Сердце[cite: 1].", sources, single_image=True),
+        self.assertEqual(render_citations("Сердце[cite: 1].", sources),
                          "Сердце[Reference \\[page\\]](https://example.org/a%28b%29?q=1).")
 
     def test_code_and_tool_arguments_are_untouched(self):
         text = '```python\nx = "[cite: 1]"\n```\nUse `[cite: 1]`.'
         call = 'ROTATOR_TOOL_12345678-1234-1234-1234-123456789abc{"arguments":{"content":"[cite: 1]"}}'
         for value in (text, call, '~~~\n[cite: 1]'):
-            self.assertEqual(render_citations(value, [], single_image=True), value)
+            self.assertEqual(render_citations(value, []), value)
 
-    def test_unsafe_links_and_unresolved_group_are_preserved(self):
+    def test_unusable_sources_are_removed_and_valid_group_members_survive(self):
         for url in ('javascript:alert(1)', 'https://user:secret@example.org', 'https://example.org/\nsecret',
                     'https://lh3.googleusercontent.com/private?token=secret', 'https://[invalid'):
             source = SimpleNamespace(id=1, title="Source", url=url)
-            self.assertEqual(render_citations('[cite: 1]', [source], single_image=True), '[cite: 1]')
-        self.assertEqual(render_citations('[cite: 1, 2]', [SimpleNamespace(id=1, title="Page", url="https://example.org")]), '[cite: 1, 2]')
+            self.assertEqual(render_citations('[cite: 1]', [source]), '')
+        self.assertEqual(render_citations('[cite: 1, 2, 1]', [SimpleNamespace(id=1, title="Page", url="https://example.org")]), '[Page](https://example.org)')
 
     def test_markers_split_at_every_boundary_and_late_metadata(self):
         text = 'A[cite: 1] B'
@@ -72,6 +68,15 @@ class CitationTest(unittest.TestCase):
             payload = {'prompt': 'Describe', 'attachments': [{'mimeType': 'image/png'}]}
             asyncio.run(worker.consume_stream(client, payload, model('argon'), events.append, {}))
             self.assertEqual(''.join(e['text'] for e in events if e['type'] == 'delta'), expected)
+
+    def test_worker_cleans_references_with_accumulated_and_mixed_attachments(self):
+        for mime_types in ([], ['image/png'] * 3, ['image/png', 'application/pdf']):
+            with self.subTest(mime_types=mime_types):
+                events = []
+                client = Client([], list('Закат[cite: 3].'))
+                payload = {'prompt': 'Describe', 'attachments': [{'mimeType': mime} for mime in mime_types]}
+                asyncio.run(worker.consume_stream(client, payload, model('argon'), events.append, {}))
+                self.assertEqual(''.join(e['text'] for e in events if e['type'] == 'delta'), 'Закат.')
 
     def test_expanding_links_still_obey_worker_output_limit(self):
         class CitedClient(Client):
