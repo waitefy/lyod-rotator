@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import binascii
+import codecs
 import contextlib
 from datetime import datetime, timezone
 import fcntl
@@ -128,9 +129,13 @@ def response_metadata(raw):
     Lengths are JavaScript UTF-16 code units, not bytes. Never search arbitrary
     response text for model names: user content can contain those same strings.
     """
-    text = raw.decode("utf-8")
-    if text.startswith(")]}'"):
-        text = text[4:]
+    ids, errors, _ = _response_metadata(raw.decode("utf-8"))
+    return ids, errors
+
+
+def _response_metadata(text, *, partial=False):
+    prefix = 4 if text.startswith(")]}'") else 0
+    text = text[prefix:]
     decoder, ids, errors = json.JSONDecoder(), [], []
     position = 0
     while position < len(text):
@@ -138,7 +143,12 @@ def response_metadata(raw):
             position += 1
         if position == len(text):
             break
-        end = text.index("\n", position)
+        frame_start = position
+        end = text.find("\n", position)
+        if end == -1:
+            if partial:
+                return ids, errors, prefix + frame_start
+            raise ValueError()
         marker = text[position:end].strip()
         if not marker.isascii() or not marker.isdecimal():
             raise ValueError()
@@ -150,6 +160,8 @@ def response_metadata(raw):
             units += 2 if ord(text[position]) > 0xFFFF else 1
             position += 1
         if units != expected:
+            if partial and units < expected:
+                return ids, errors, prefix + frame_start
             raise ValueError()
         envelope = decoder.decode(text[start:position])
         if not isinstance(envelope, list):
@@ -172,7 +184,7 @@ def response_metadata(raw):
                 if not isinstance(inner[39], str) or not inner[39]:
                     raise ValueError()
                 ids.append(inner[39])
-    return ids, errors
+    return ids, errors, prefix + position
 
 
 def response_model_ids(raw):
@@ -180,10 +192,11 @@ def response_model_ids(raw):
 
 
 class ModelGuard:
-    """Buffer the bounded wire response before the library can emit any text.
+    """Inspect a bounded wire response before consume_stream releases output.
 
     Google may put the served model in the final frame. Checking just the first
     delta would allow an HTTP-200 downgrade to escape, including tool calls.
+    The library must still receive live chunks so its watchdog sees progress.
     """
     def __init__(self, expected):
         if not isinstance(expected, str) or not expected:
@@ -204,16 +217,20 @@ class ModelGuard:
         except (ValueError, TypeError, UnicodeError, RecursionError):
             self.error = ModelVerificationError("invalid response metadata")
         else:
-            if any(model_id != self.expected for model_id in ids):
-                self.error = WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: Google returned a different model; response discarded", 60)
-            elif errors:
-                # A permanent error in the same response prevents a retry,
-                # even if an earlier frame reported temporary error 1013.
-                self.error = GoogleStreamError(next((code for code in errors if code != 1013), errors[0]))
-            elif not ids:
+            self.inspect_metadata(ids, errors)
+            if self.error:
+                return
+            if not ids:
                 self.error = ModelVerificationError("missing model identifier")
             else:
                 self.verified = True
+
+    def inspect_metadata(self, ids, errors):
+        if any(model_id != self.expected for model_id in ids):
+            self.error = WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: Google returned a different model; response discarded", 60)
+        elif errors:
+            # A later permanent error overrides a preceding temporary failure.
+            self.error = GoogleStreamError(next((code for code in errors if code != 1013), errors[0]))
 
     @contextlib.contextmanager
     def transport(self, client):
@@ -230,6 +247,8 @@ class ModelGuard:
 
             async def aiter_content(self, *args, **kwargs):
                 raw = bytearray()
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                metadata = ""
                 first = True
                 async for chunk in self.response.aiter_content(*args, **kwargs):
                     if first and chunk:
@@ -239,13 +258,27 @@ class ModelGuard:
                         guard.error = WorkerError(502, "Gemini Web response exceeds the verification limit")
                         raise guard.error
                     raw.extend(chunk)
+                    try:
+                        metadata += decoder.decode(chunk)
+                        ids, errors, consumed = _response_metadata(metadata, partial=True)
+                        metadata = metadata[consumed:]
+                    except (ValueError, TypeError, UnicodeError, RecursionError):
+                        guard.error = ModelVerificationError("invalid response metadata")
+                    else:
+                        guard.inspect_metadata(ids, errors)
+                    temporary = isinstance(guard.error, GoogleStreamError) and guard.error.google_code == 1013
+                    if guard.error and not temporary:
+                        raise guard.error
+                    # Never let the library turn a fatal frame into its own
+                    # unbounded retries. Drain 1013 to check for a later quota
+                    # failure before permitting the adapter's single retry.
+                    yield b"" if temporary else chunk
                 self.mark("googleStreamEnd")
                 guard.inspect(raw)
                 if guard.error and not isinstance(guard.error, ModelVerificationError):
                     raise guard.error
-                # For unverifiable metadata, let the library identify other
-                # explicit failures; consume_stream still checks before ready.
-                yield bytes(raw)
+                # consume_stream buffers parsed output until this check finishes.
+                # Let the library identify explicit failures for missing metadata.
 
         @contextlib.asynccontextmanager
         async def stream(method, url, **kwargs):
@@ -522,22 +555,23 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
     image = None
     citations = CitationText()
     emitted_chars = 0
+    pending = []
+    publish = pending.append if guard is not None else emit_event
     async with contextlib.aclosing(
         client.generate_content_stream(payload["prompt"], model=model, temporary=True, **kwargs)
     ) as stream:
         first = await anext(stream, None)
-        if guard is not None:
-            guard.check()
         if first is None:
+            if guard is not None:
+                guard.check()
             raise WorkerError(502, "Gemini Web returned no response")
-        emit_event({"type": "ready"})
+        if guard is None:
+            emit_event({"type": "ready"})
         count = 0
         truncated = False
 
         def send(output):
             nonlocal count, truncated, image, emitted_chars
-            if guard is not None:
-                guard.check()
             if image_mode:
                 candidates = getattr(output, "candidates", [])
                 chosen = getattr(output, "chosen", 0)
@@ -556,18 +590,22 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
             sources = getattr(candidates[chosen], "citations", []) if isinstance(chosen, int) and 0 <= chosen < len(candidates) else []
             text = citations.feed(text, sources)
             if text:
-                emit_event({"type": "delta", "text": text})
+                publish({"type": "delta", "text": text})
                 emitted_chars += len(text)
             truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
 
         send(first)
-        if not truncated:
-            async for output in stream:
+        async for output in stream:
+            if not truncated:
                 send(output)
-                if truncated:
-                    break
+            # Even truncated text must consume the final model/error frame.
+            if truncated and guard is None:
+                break
     if guard is not None:
         guard.check()
+        emit_event({"type": "ready"})
+        for event in pending:
+            emit_event(event)
     tail = citations.finish()
     remaining = MAX_OUTPUT_CHARS - emitted_chars
     if tail:

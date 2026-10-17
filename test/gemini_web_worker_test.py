@@ -105,6 +105,58 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(events[0]["type"], "ready")
         self.assertEqual(events[-1], {"type": "done", "truncated": False})
 
+    def test_live_network_progress_reaches_client_before_model_verification(self):
+        async def check(served, limit):
+            completed = False
+            class ProgressClient(Client):
+                @contextlib.asynccontextmanager
+                async def http_stream(self, *args, **kwargs):
+                    nonlocal completed
+                    async with super().http_stream(*args, **kwargs) as response:
+                        async def content():
+                            nonlocal completed
+                            async for chunk in response.aiter_content():
+                                await asyncio.sleep(.005)
+                                yield chunk
+                            completed = True
+                        yield SimpleNamespace(status_code=200, aiter_content=content)
+
+                async def generate_content_stream(self, prompt, *, model, temporary):
+                    self.generation_calls += 1
+                    async with self.client.stream("POST", worker.GENERATE_ENDPOINT) as response:
+                        iterator = response.aiter_content().__aiter__()
+                        first = True
+                        while True:
+                            try:
+                                # The pinned client has the same per-chunk watchdog.
+                                await asyncio.wait_for(anext(iterator), timeout=.05)
+                            except StopAsyncIteration:
+                                break
+                            if first:
+                                first = False
+                                yield SimpleNamespace(text="abcdefghi", text_delta="abcdefghi")
+
+            client = ProgressClient([model("argon")], [])
+            client.served_model_id = served
+            events = []
+            def emit(event):
+                self.assertTrue(completed, "unverified output escaped before the final wire frame")
+                events.append(event)
+            with patch.object(worker, "MAX_OUTPUT_CHARS", limit):
+                if served != model("argon").model_id:
+                    with self.assertRaises(worker.WorkerError) as caught:
+                        await worker.run(self.payload, lambda *a, **k: client, emit_event=emit)
+                    self.assertEqual(caught.exception.status, 502 if served is None else 429)
+                    self.assertEqual(events, [])
+                else:
+                    await worker.run(self.payload, lambda *a, **k: client, emit_event=emit)
+                    self.assertEqual([event["type"] for event in events], ["ready", "delta", "done"])
+                    self.assertEqual(events[1]["text"], "abcdefghi"[:limit])
+                    self.assertEqual(events[-1]["truncated"], limit < 9)
+        for served, limit in ((model("argon").model_id, 100), (model("argon").model_id, 6), ("other-model", 6), (None, 6)):
+            with self.subTest(served=served, limit=limit):
+                asyncio.run(check(served, limit))
+
     def test_never_falls_back_to_pro_or_unavailable_argon(self):
         for models in (None, [model("Gemini Pro")], [model("Gemini 4 Argon", False)]):
             client = Client(models, ["wrong model"])
@@ -236,7 +288,7 @@ class WorkerTest(unittest.TestCase):
             self.assertIn(message, caught.exception.message)
             self.assertEqual(client.generation_calls, 1)
 
-    def test_temporary_google_error_never_replays_after_tool_output(self):
+    def test_late_google_error_does_not_release_buffered_tool_output(self):
         raw = self.wire_error(1013)
         class LaterFailureClient(Client):
             async def generate_content_stream(self, prompt, *, model, temporary):
@@ -250,8 +302,8 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaises(worker.WorkerError) as caught:
             asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
         self.assertEqual(caught.exception.status, 503)
-        self.assertEqual(client.generation_calls, 1)
-        self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "tool call"}])
+        self.assertEqual(client.generation_calls, 2)
+        self.assertEqual(events, [])
 
     def test_invalid_error_metadata_and_api_error_strings_never_leak(self):
         client = Client([model("argon")], ["must not escape"])
@@ -270,21 +322,18 @@ class WorkerTest(unittest.TestCase):
             self.assertNotIn("PRIVATE", message)
 
     def test_verification_retry_never_replays_after_text_or_tool_call(self):
-        class LaterFailureClient(Client):
-            async def generate_content_stream(self, prompt, *, model, temporary):
-                self.generation_calls += 1
-                await self.read_generation()
-                yield SimpleNamespace(text="tool call", text_delta="tool call")
-                self.served_model_id = None
-                await self.read_generation()
-                yield SimpleNamespace(text="must not escape", text_delta="must not escape")
-        client = LaterFailureClient([model("argon")], [])
-        events = []
-        with self.assertRaises(worker.WorkerError) as caught:
-            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
-        self.assertEqual(caught.exception.status, 502)
-        self.assertEqual(client.generation_calls, 1)
-        self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "tool call"}])
+        for failure in (worker.ModelVerificationError("missing model identifier"), worker.GoogleStreamError(1013)):
+            client = Client([model("argon")], [])
+            events = []
+            async def generate(client, payload, model, emit_event, attachments, guard):
+                client.generation_calls += 1
+                emit_event({"type": "ready"})
+                emit_event({"type": "delta", "text": "tool call"})
+                raise failure
+            with patch.object(worker, "generate", generate), self.assertRaises(worker.WorkerError):
+                asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+            self.assertEqual(client.generation_calls, 1)
+            self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "tool call"}])
 
     def test_explicit_auth_quota_and_model_errors_are_not_retried(self):
         for name in ("AuthError", "UsageLimitExceededError", "ModelInvalidError"):

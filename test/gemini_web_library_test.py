@@ -35,7 +35,8 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
                     calls.append(1)
 
                     async def content():
-                        yield raw
+                        for offset in range(0, len(raw), 7):
+                            yield raw[offset:offset + 7]
 
                     yield SimpleNamespace(status_code=200, aiter_content=content)
 
