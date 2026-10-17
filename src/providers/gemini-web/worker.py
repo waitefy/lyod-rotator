@@ -16,6 +16,8 @@ import sys
 import tempfile
 from urllib.parse import urljoin, urlsplit
 
+from citation_text import CitationText
+
 # Mirror GEMINI_WEB_MAX_PROMPT_BYTES in credentials.ts.
 MAX_PROMPT_BYTES = 4 * 1024 * 1024
 # Mirror attachments.ts. No local paths or remote URLs cross this protocol.
@@ -420,6 +422,9 @@ async def generate(client, payload, model, emit_event, attachments=(), guard=Non
 async def consume_stream(client, payload, model, emit_event, kwargs, guard=None):
     image_mode = payload.get("output") in ("image", "image-or-text")
     image = None
+    attachments = payload.get("attachments", [])
+    citations = CitationText(single_image=len(attachments) == 1 and attachments[0]["mimeType"].startswith("image/"))
+    emitted_chars = 0
     async with contextlib.aclosing(
         client.generate_content_stream(payload["prompt"], model=model, temporary=True, **kwargs)
     ) as stream:
@@ -433,7 +438,7 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
         truncated = False
 
         def send(output):
-            nonlocal count, truncated, image
+            nonlocal count, truncated, image, emitted_chars
             if guard is not None:
                 guard.check()
             if image_mode:
@@ -448,9 +453,14 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
             delta = output.text_delta or ""
             remaining = MAX_OUTPUT_CHARS - count
             text = delta[:remaining]
+            count += len(text)
+            candidates = getattr(output, "candidates", [])
+            chosen = getattr(output, "chosen", 0)
+            sources = getattr(candidates[chosen], "citations", []) if isinstance(chosen, int) and 0 <= chosen < len(candidates) else []
+            text = citations.feed(text, sources)
             if text:
                 emit_event({"type": "delta", "text": text})
-                count += len(text)
+                emitted_chars += len(text)
             truncated = len(delta) > remaining or count >= MAX_OUTPUT_CHARS
 
         send(first)
@@ -461,6 +471,13 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
                     break
     if guard is not None:
         guard.check()
+    tail = citations.finish()
+    remaining = MAX_OUTPUT_CHARS - emitted_chars
+    if tail:
+        if len(tail) > remaining:
+            truncated = True
+        if remaining:
+            emit_event({"type": "delta", "text": tail[:remaining]})
     if image_mode and image is None and payload.get("output") == "image":
         raise WorkerError(502, "Gemini Web returned no generated image; the request may have been refused")
     if image_mode and image is not None:
