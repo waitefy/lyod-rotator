@@ -59,8 +59,8 @@ jobs:
       - name: Run Gemini Web worker and session tests
         run: npm run test:gemini-web
 
-      - name: Run OMP integration tests
-        run: node --test scripts/omp-gemini-web.test.mjs
+      - name: Run harness integration tests
+        run: node --test scripts/omp-gemini-web.test.mjs test/pi-gemini-images.test.mjs
 
       - name: Run coverage
         run: npm run coverage
