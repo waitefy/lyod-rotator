@@ -17,6 +17,7 @@ import tempfile
 from urllib.parse import urljoin, urlsplit
 
 from citation_text import CitationText
+from telemetry import CURRENT, phase
 
 # Mirror GEMINI_WEB_MAX_PROMPT_BYTES in credentials.ts.
 MAX_PROMPT_BYTES = 4 * 1024 * 1024
@@ -239,8 +240,11 @@ class ModelGuard:
                 if guard.error:
                     raise guard.error
                 guard.verified = False
-            async with original_stream(method, url, **kwargs) as response:
-                yield Response(response) if generate and response.status_code == 200 else response
+            if generate and CURRENT.get() is not None:
+                CURRENT.get().google_requests += 1
+            with phase("googleRequest") if generate else contextlib.nullcontext():
+                async with original_stream(method, url, **kwargs) as response:
+                    yield Response(response) if generate and response.status_code == 200 else response
 
         self.client, self.original, self.stream = client, original, stream
         original.stream = stream
@@ -386,7 +390,8 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.environ["GEMINI_COOKIE_PATH"] = str(cache)
     with (cache / "session.lock").open("a") as lock:
-        await acquire_session_lock(lock)
+        with phase("fileLock"):
+            await acquire_session_lock(lock)
         if client_factory is None:
             from gemini_webapi import GeminiClient, set_log_level
 
@@ -394,16 +399,19 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
             client_factory = GeminiClient
         client = client_factory(psid, psidts, proxy=payload.get("proxy"))
         try:
-            await client.init(timeout=450, auto_close=False, auto_refresh=True, verbose=False)
+            with phase("init"):
+                await client.init(timeout=450, auto_close=False, auto_refresh=True, verbose=False)
             # The library can initialize successfully in guest mode after cookies
             # expire. Treat that as failed authentication before model discovery.
             if getattr(getattr(client, "account_status", None), "name", None) == "UNAUTHENTICATED":
                 raise WorkerError(401, "Gemini Web session expired or was rejected; reconnect it")
-            model = select_argon(client.list_models())
+            with phase("modelSelection"):
+                model = select_argon(client.list_models())
             # init() is a no-op for a persistent client; refresh its budget too.
             refresh_usage = getattr(client, "_fetch_usage_info", None)
             if callable(refresh_usage):
-                await refresh_usage()
+                with phase("quota"):
+                    await refresh_usage()
             usage = usage_snapshot(client)
             if mode == "probe":
                 identity = None
@@ -423,9 +431,10 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
                     completed["identity"] = identity
             else:
                 # Validate upstream before sending HTTP 200 to the downstream client.
-                retry_after = exhausted_retry_after(usage)
-                if retry_after is not None:
-                    raise WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: account usage limit reached", retry_after)
+                with phase("quota"):
+                    retry_after = exhausted_retry_after(usage)
+                    if retry_after is not None:
+                        raise WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: account usage limit reached", retry_after)
                 with thinking_transport(client, level) if level is not None else contextlib.nullcontext():
                     completed = await generate_verified(client, payload, model, emit_event, attachments)
         finally:
@@ -446,9 +455,13 @@ async def generate_verified(client, payload, model, emit_event, attachments=()):
         emit_event(event)
 
     for attempt in range(2):
+        trace = CURRENT.get()
+        if trace is not None:
+            trace.attempts += 1
+            trace.failed_stage = None
         guard = ModelGuard(getattr(model, "model_id", None))
         try:
-            with guard.transport(client):
+            with phase("generation"), guard.transport(client):
                 return await generate(client, payload, model, forward_event, attachments, guard)
         except Exception as error:
             if type(error).__name__ in ("UsageLimitExceededError", "AuthError", "ModelInvalidError"):
@@ -547,7 +560,9 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
         image_url = image.url.replace("=s1024-rj", "=s2048-rj")
         if "=s2048-rj" not in image_url:
             image_url += "=s2048-rj"
-        emit_event({"type": "image", **await download_generated_image(client.client, image_url)})
+        with phase("imageDownload"):
+            downloaded = await download_generated_image(client.client, image_url)
+        emit_event({"type": "image", **downloaded})
     return {"type": "done", "truncated": truncated}
 
 

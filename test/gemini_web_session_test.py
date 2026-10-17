@@ -17,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / "src/providers/gemini-web"))
 import session
 from gemini_web_worker_test import Client, model
+import gemini_web_worker_test as fixtures
 
 
 class SessionTest(unittest.IsolatedAsyncioTestCase):
@@ -33,6 +34,67 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
             return client
         self.session = session.Session(self.payload, factory, self.saves.append)
         self.addAsyncCleanup(self.session.close_client)
+
+    async def test_diagnostics_precede_done_and_do_not_contain_request_or_identity(self):
+        events = []
+        await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        self.assertEqual([e["type"] for e in events], ["ready", "delta", "diagnostic", "done"])
+        report = events[-2]
+        self.assertEqual(report["attempts"], 1)
+        self.assertEqual(report["googleRequests"], 1)
+        self.assertTrue({"sessionWait", "fileLock", "init", "modelSelection", "generation", "googleRequest", "persist"} <= report["timingsMs"].keys())
+        self.assertTrue(all(type(value) is int and value >= 0 for value in report["timingsMs"].values()))
+        serialized = json.dumps(report)
+        for secret in (self.payload["prompt"], str(self.cookies), "__Secure", "95a4c0abcba24364"):
+            self.assertNotIn(secret, serialized)
+        self.assertIsNone(session.CURRENT.get())
+
+    async def test_google_1100_is_diagnosed_without_replaying_image_generation(self):
+        def factory(*args, **kwargs):
+            client = Client([model("argon")], ["private answer"])
+            client.raw_response = fixtures.WorkerTest.wire_error(1100)
+            self.clients.append(client)
+            return client
+        self.session.client_factory = factory
+        events = []
+        with self.assertRaises(session.worker.WorkerError):
+            await self.session.execute({**self.payload, "output": "image", "diagnostics": True}, events.append)
+        self.assertEqual(len(events), 1)
+        report = events[0]
+        self.assertEqual(report["googleCode"], 1100)
+        self.assertEqual(report["errorKind"], "GoogleStreamError")
+        self.assertEqual(report["failedStage"], "googleRequest")
+        self.assertEqual(report["attempts"], 1)
+        self.assertEqual(self.clients[0].generation_calls, 1)
+        self.assertNotIn("private answer", json.dumps(report))
+
+    async def test_unknown_exception_text_and_class_name_are_not_logged(self):
+        class SecretTokenInClassName(Exception):
+            pass
+        class FailingClient(Client):
+            async def init(self, **kwargs):
+                raise SecretTokenInClassName("Bearer secret-cookie-token signed-url private-chat")
+        self.session.client_factory = lambda *a, **k: FailingClient([model("argon")], [])
+        events = []
+        with self.assertRaises(SecretTokenInClassName):
+            await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        self.assertEqual(events[0]["errorKind"], "unknown")
+        self.assertEqual(events[0]["failedStage"], "init")
+        self.assertEqual(events[0]["googleRequests"], 0)
+        self.assertNotIn("secret", json.dumps(events).lower())
+        self.assertIsNone(session.CURRENT.get())
+
+    async def test_diagnostics_count_verification_retry_and_reset_failure_on_success(self):
+        client = Client([model("argon")], ["verified"])
+        client.response_sequence = [(None, b")]}'\n"), (client.served_model_id, None)]
+        self.session.client_factory = lambda *a, **k: client
+        events = []
+        await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        report = events[-2]
+        self.assertEqual(report["attempts"], 2)
+        self.assertEqual(report["googleRequests"], 2)
+        self.assertNotIn("failedStage", report)
+        self.assertNotIn("errorKind", report)
 
     async def test_reuses_client_while_idle_and_reloads_changed_credentials(self):
         events = []

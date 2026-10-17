@@ -249,6 +249,20 @@ describe("private worker protocol", () => {
     }
   }
 
+  it("accepts private diagnostics without forwarding them to the API stream", async () => {
+    await fakePython(`import json,sys
+request=json.load(sys.stdin)
+assert request['diagnostics'] is True
+for event in [{'type':'ready'},{'type':'delta','text':'ok'},{'type':'diagnostic','googleCode':1100,'timingsMs':{'init':2},'cookies':'private-cookie'},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const { response } = await runWebWorker({ mode: "generate", prompt: "private-prompt" });
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      assert.match(text, /"text":"ok"/);
+      assert.doesNotMatch(text, /diagnostic|private-cookie|private-prompt|googleCode|timingsMs/);
+    });
+  });
+
   it("rejects malformed tool calls before committing HTTP 200", async () => {
     const bridge = createToolBridge([readTool.function]);
     const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];

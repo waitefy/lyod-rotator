@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { PassThrough, Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { AccountRuntime } from "../../types.js";
+import { logger } from "../../logger.js";
+import { workerTelemetry } from "./telemetry.js";
 import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
@@ -194,6 +197,16 @@ export function runWebWorker(
 ): Promise<ForwardedResponse & { retryToolCall?: boolean }> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
   return new Promise((resolve, reject) => {
+    const startedAt = performance.now();
+    const diagnosticId = randomUUID();
+    let telemetry: Record<string, unknown> = {};
+    let readyMs: number | undefined;
+    const logCompletion = (outcome: "done" | "error" | "cancelled", status: number): void => {
+      logger.log(outcome === "error" ? "warn" : "info", "gemini-web", JSON.stringify({
+        diagnosticId, operation: payload.mode === "probe" ? "probe" : payload.output === "image" || payload.output === "image-or-text" ? "image" : "text",
+        outcome, status, workerMs: Math.round(performance.now() - startedAt), readyMs, ...telemetry,
+      }));
+    };
     const child = spawn(process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3", [WORKER], {
       stdio: ["pipe", "pipe", "ignore"],
     });
@@ -223,6 +236,7 @@ export function runWebWorker(
     const fail = (status: number, message: string, retryToolCall = false, retryAfterSeconds = 60): void => {
       if (done) return;
       done = true;
+      logCompletion("error", status);
       cleanup();
       stop();
       if (settled) output.destroy(new Error(message));
@@ -231,6 +245,7 @@ export function runWebWorker(
     const abort = (): void => {
       if (done) return;
       done = true;
+      logCompletion("cancelled", 499);
       cleanup();
       stop();
       const error = new Error("Gemini Web request cancelled");
@@ -250,7 +265,9 @@ export function runWebWorker(
         if (Buffer.byteLength(line) > MAX_IMAGE_EVENT_BYTES) throw new Error("output limit");
         const event: unknown = JSON.parse(line);
         if (!isRecord(event)) throw new Error("protocol");
-        if (event.type === "error") {
+        if (event.type === "diagnostic") {
+          telemetry = workerTelemetry(event);
+        } else if (event.type === "error") {
           const status = typeof event.status === "number" && [400, 401, 403, 404, 409, 429, 502, 503, 504].includes(event.status) ? event.status : 502;
           // Only our worker's fixed, non-secret messages cross this boundary.
           const retry = typeof event.retryAfterSeconds === "number" && Number.isInteger(event.retryAfterSeconds)
@@ -258,6 +275,7 @@ export function runWebWorker(
           fail(status, typeof event.message === "string" ? event.message : "Gemini Web request failed", false, retry);
         } else if (event.type === "ready" && !ready) {
           ready = true;
+          readyMs = Math.round(performance.now() - startedAt);
           // Tool output is already buffered: validate it before committing HTTP 200.
           if (!bridge && !imageMode && payload.mode !== "probe") startResponse();
         } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
@@ -276,6 +294,7 @@ export function runWebWorker(
         } else if (event.type === "done" && ready) {
           if (payload.mode === "probe") {
             done = settled = true;
+            logCompletion("done", 200);
             cleanup();
             output.destroy();
             resolve({ endpoint: ENDPOINT, response: Response.json({ usage: event.usage ?? {},
@@ -296,6 +315,7 @@ export function runWebWorker(
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [part] } }] })}\n\n`);
           }
           done = true;
+          logCompletion("done", 200);
           cleanup();
           output.end(`data: ${JSON.stringify({ candidates: [{ finishReason: event.truncated ? "MAX_TOKENS" : "STOP" }] })}\n\n`);
         } else throw new Error("protocol");
@@ -305,7 +325,7 @@ export function runWebWorker(
       if (!done) fail(502, "Gemini Web worker ended without completing the response");
       lines.close();
     });
-    child.stdin.end(JSON.stringify(payload));
+    child.stdin.end(JSON.stringify({ ...payload, diagnostics: true }));
   });
 }
 
