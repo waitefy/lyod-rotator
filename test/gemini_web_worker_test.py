@@ -30,10 +30,12 @@ class Client:
     def __init__(self, models, deltas):
         self.models, self.deltas = models, deltas
         self.generated = False
+        self.generation_calls = 0
         self.closed = False
         self.served_model_id = "95a4c0abcba24364"
         self.usage_info = {}
         self.raw_response = None
+        self.response_sequence = []
         self.client = SimpleNamespace(stream=self.http_stream)
 
     @contextlib.asynccontextmanager
@@ -64,6 +66,9 @@ class Client:
 
     async def generate_content_stream(self, prompt, *, model, temporary):
         self.generated = True
+        self.generation_calls += 1
+        if self.response_sequence:
+            self.served_model_id, self.raw_response = self.response_sequence.pop(0)
         self.selection, self.temporary, self.prompt = model, temporary, prompt
         await self.read_generation()
         cumulative = ""
@@ -131,6 +136,71 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(caught.exception.status, status)
             self.assertEqual(events, [])
             self.assertTrue(client.closed)
+
+    def test_verification_failure_retries_once_before_emitting_any_event(self):
+        for first_id, first_raw in ((None, None), (None, b")]}'\n999\n[]\n")):
+            with self.subTest(malformed=first_raw is not None):
+                argon = model("argon")
+                client = Client([argon], ["verified answer"])
+                client.response_sequence = [(first_id, first_raw), (argon.model_id, None)]
+                events = self.run_client(client)
+                self.assertEqual(client.generation_calls, 2)
+                self.assertIs(client.selection, argon)
+                self.assertEqual([e["type"] for e in events], ["ready", "delta", "done"])
+                self.assertEqual(events[1]["text"], "verified answer")
+
+    def test_verification_retry_is_bounded_and_reports_safe_reason(self):
+        for raw, reason in ((None, "missing model identifier"),
+                            (b")]}'\n999\n[]\n", "invalid response metadata")):
+            client = Client([model("argon")], ["must not escape"])
+            client.served_model_id, client.raw_response = None, raw
+            events = []
+            with self.assertRaises(worker.WorkerError) as caught:
+                asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+            self.assertEqual(client.generation_calls, 2)
+            self.assertEqual(caught.exception.status, 502)
+            self.assertIn(reason, caught.exception.message)
+            self.assertEqual(events, [])
+
+    def test_different_model_never_receives_verification_retry(self):
+        client = Client([model("argon")], ["must not escape"])
+        client.response_sequence = [("8c46e95b1a07cecc", None), ("95a4c0abcba24364", None)]
+        with self.assertRaises(worker.WorkerError) as caught:
+            self.run_client(client)
+        self.assertEqual(caught.exception.status, 429)
+        self.assertEqual(client.generation_calls, 1)
+
+    def test_verification_retry_never_replays_after_text_or_tool_call(self):
+        class LaterFailureClient(Client):
+            async def generate_content_stream(self, prompt, *, model, temporary):
+                self.generation_calls += 1
+                await self.read_generation()
+                yield SimpleNamespace(text="tool call", text_delta="tool call")
+                self.served_model_id = None
+                await self.read_generation()
+                yield SimpleNamespace(text="must not escape", text_delta="must not escape")
+        client = LaterFailureClient([model("argon")], [])
+        events = []
+        with self.assertRaises(worker.WorkerError) as caught:
+            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(client.generation_calls, 1)
+        self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "tool call"}])
+
+    def test_explicit_auth_quota_and_model_errors_are_not_retried(self):
+        for name in ("AuthError", "UsageLimitExceededError", "ModelInvalidError"):
+            upstream_error = type(name, (Exception,), {})
+            class ErrorClient(Client):
+                async def generate_content_stream(self, prompt, *, model, temporary):
+                    self.generation_calls += 1
+                    self.served_model_id = None
+                    await self.read_generation()
+                    raise upstream_error()
+                    yield
+            client = ErrorClient([model("argon")], [])
+            with self.assertRaises(upstream_error):
+                self.run_client(client)
+            self.assertEqual(client.generation_calls, 1)
 
     def test_wire_guard_checks_final_frames_not_names_or_user_text(self):
         def frame(identity, user_text=""):

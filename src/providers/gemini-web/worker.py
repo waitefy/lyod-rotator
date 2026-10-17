@@ -92,6 +92,11 @@ class WorkerError(Exception):
         self.retry_after = retry_after
 
 
+class ModelVerificationError(WorkerError):
+    def __init__(self, reason):
+        super().__init__(502, f"Gemini Web response model could not be verified ({reason}); response discarded")
+
+
 def response_model_ids(raw):
     """Read only inner[39] from Google's length-prefixed JSON envelopes.
 
@@ -157,12 +162,12 @@ class ModelGuard:
     def inspect(self, raw):
         try:
             ids = response_model_ids(raw)
-            if not ids:
-                raise ValueError()
         except (ValueError, TypeError, UnicodeError, RecursionError):
-            self.error = WorkerError(502, "Gemini Web response model could not be verified; response discarded")
+            self.error = ModelVerificationError("invalid response metadata")
         else:
-            if any(model_id != self.expected for model_id in ids):
+            if not ids:
+                self.error = ModelVerificationError("missing model identifier")
+            elif any(model_id != self.expected for model_id in ids):
                 self.error = WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: Google returned a different model; response discarded", 60)
             else:
                 self.verified = True
@@ -386,15 +391,8 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
                 retry_after = exhausted_retry_after(usage)
                 if retry_after is not None:
                     raise WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: account usage limit reached", retry_after)
-                guard = ModelGuard(getattr(model, "model_id", None))
                 with thinking_transport(client, level) if level is not None else contextlib.nullcontext():
-                    with guard.transport(client):
-                        try:
-                            completed = await generate(client, payload, model, emit_event, attachments, guard)
-                        except Exception as error:
-                            if guard.error and type(error).__name__ not in ("UsageLimitExceededError", "AuthError", "ModelInvalidError"):
-                                raise guard.error from None
-                            raise
+                    completed = await generate_verified(client, payload, model, emit_event, attachments)
         finally:
             if not keep_open:
                 with contextlib.suppress(Exception):
@@ -402,6 +400,32 @@ async def run(payload, client_factory=None, *, keep_open=False, emit_event=emit)
     # Flush refreshed cookies and release the session lock before acknowledging
     # completion, so the next conversation turn can start immediately.
     emit_event(completed)
+
+
+async def generate_verified(client, payload, model, emit_event, attachments=()):
+    started = False
+
+    def forward_event(event):
+        nonlocal started
+        started = True
+        emit_event(event)
+
+    for attempt in range(2):
+        guard = ModelGuard(getattr(model, "model_id", None))
+        try:
+            with guard.transport(client):
+                return await generate(client, payload, model, forward_event, attachments, guard)
+        except Exception as error:
+            if type(error).__name__ in ("UsageLimitExceededError", "AuthError", "ModelInvalidError"):
+                raise
+            failure = guard.error or error
+            # Both attempts require the same Argon ID. No replay is allowed
+            # after ready/text/tool output, or for quota/auth/model mismatches.
+            if attempt == 0 and not started and isinstance(failure, ModelVerificationError):
+                continue
+            if failure is error:
+                raise
+            raise failure from None
 
 
 async def generate(client, payload, model, emit_event, attachments=(), guard=None):
