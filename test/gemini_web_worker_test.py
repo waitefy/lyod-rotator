@@ -170,6 +170,105 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(caught.exception.status, 429)
         self.assertEqual(client.generation_calls, 1)
 
+    @staticmethod
+    def wire_error(code, identity=None):
+        parts = []
+        if identity:
+            inner = [None] * 40
+            inner[39] = identity
+            parts.append(["wrb.fr", None, json.dumps(inner)])
+        # Same error path read by the pinned client's _process_parts:
+        # part[5][2][0][1][0]. No response text or exception string is trusted.
+        parts.append(["wrb.fr", None, None, None, None, [None, None, [[None, [code]]]]])
+        envelope = json.dumps(parts)
+        return (")]}'\n" + str(len(envelope) + 2) + "\n" + envelope + "\n").encode()
+
+    def test_google_stream_error_is_reported_before_partial_text_or_tool_output(self):
+        client = Client([model("argon")], ["must not escape"])
+        client.raw_response = self.wire_error(1099, client.served_model_id)
+        events = []
+        with self.assertRaises(worker.WorkerError) as caught:
+            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn("Google code 1099", caught.exception.message)
+        self.assertEqual(events, [])
+        self.assertEqual(client.generation_calls, 1)
+
+    def test_google_error_codes_are_not_misreported_as_missing_model_identity(self):
+        for code, status in ((1037, 429), (1050, 404), (1052, 404), (1060, 403), (1099, 502)):
+            with self.subTest(code=code):
+                client = Client([model("argon")], ["must not escape"])
+                client.raw_response = self.wire_error(code)
+                events = []
+                with self.assertRaises(worker.WorkerError) as caught:
+                    asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+                self.assertEqual(caught.exception.status, status)
+                self.assertIn(f"Google code {code}", caught.exception.message)
+                self.assertEqual(client.generation_calls, 1)
+                self.assertEqual(events, [])
+
+    def test_explicit_temporary_google_error_retries_once_with_same_argon_before_output(self):
+        argon = model("argon")
+        client = Client([argon], ["verified answer"])
+        client.response_sequence = [(None, self.wire_error(1013)), (argon.model_id, None)]
+        events = self.run_client(client)
+        self.assertEqual(client.generation_calls, 2)
+        self.assertIs(client.selection, argon)
+        self.assertEqual([e["type"] for e in events], ["ready", "delta", "done"])
+        client = Client([argon], ["must not escape"])
+        client.raw_response = self.wire_error(1013)
+        events = []
+        with self.assertRaises(worker.WorkerError) as caught:
+            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+        self.assertEqual(caught.exception.status, 503)
+        self.assertIn("Google code 1013", caught.exception.message)
+        self.assertEqual(client.generation_calls, 2)
+        self.assertEqual(events, [])
+
+    def test_temporary_google_error_does_not_override_a_permanent_error_or_model_mismatch(self):
+        for raw, message in ((self.wire_error(1013) + self.wire_error(1037).removeprefix(b")]}'\n"), "Google code 1037"),
+                             (self.wire_error(1013, "other-model"), "different model")):
+            client = Client([model("argon")], ["must not escape"])
+            client.raw_response = raw
+            with self.assertRaises(worker.WorkerError) as caught:
+                self.run_client(client)
+            self.assertEqual(caught.exception.status, 429)
+            self.assertIn(message, caught.exception.message)
+            self.assertEqual(client.generation_calls, 1)
+
+    def test_temporary_google_error_never_replays_after_tool_output(self):
+        raw = self.wire_error(1013)
+        class LaterFailureClient(Client):
+            async def generate_content_stream(self, prompt, *, model, temporary):
+                self.generation_calls += 1
+                await self.read_generation()
+                yield SimpleNamespace(text="tool call", text_delta="tool call")
+                self.raw_response = raw
+                await self.read_generation()
+        client = LaterFailureClient([model("argon")], [])
+        events = []
+        with self.assertRaises(worker.WorkerError) as caught:
+            asyncio.run(worker.run(self.payload, lambda *a, **k: client, emit_event=events.append))
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(client.generation_calls, 1)
+        self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "tool call"}])
+
+    def test_invalid_error_metadata_and_api_error_strings_never_leak(self):
+        client = Client([model("argon")], ["must not escape"])
+        client.raw_response = self.wire_error("PRIVATE", client.served_model_id)
+        with self.assertRaises(worker.WorkerError) as caught:
+            self.run_client(client)
+        self.assertIn("invalid response metadata", caught.exception.message)
+        self.assertNotIn("PRIVATE", caught.exception.message)
+        APIError = type("APIError", (Exception,), {})
+        for status, detail in ((503, "HTTP 503"), ("PRIVATE", "APIError"), (True, "APIError")):
+            error = APIError("__Secure-1PSID=PRIVATE")
+            error.status_code = status
+            safe_status, message = worker.safe_error(error)
+            self.assertEqual(safe_status, 502)
+            self.assertIn(detail, message)
+            self.assertNotIn("PRIVATE", message)
+
     def test_verification_retry_never_replays_after_text_or_tool_call(self):
         class LaterFailureClient(Client):
             async def generate_content_stream(self, prompt, *, model, temporary):

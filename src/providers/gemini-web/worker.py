@@ -97,8 +97,23 @@ class ModelVerificationError(WorkerError):
         super().__init__(502, f"Gemini Web response model could not be verified ({reason}); response discarded")
 
 
-def response_model_ids(raw):
-    """Read only inner[39] from Google's length-prefixed JSON envelopes.
+class GoogleStreamError(WorkerError):
+    def __init__(self, code):
+        # ErrorCode and _process_parts in the pinned gemini-webapi revision.
+        status, reason = {
+            1013: (503, "temporary upstream error"),
+            1037: (429, "RESOURCE_EXHAUSTED: usage limit reached"),
+            1050: (404, "selected model is inconsistent with the conversation"),
+            1052: (404, "selected model or request structure was rejected"),
+            1060: (403, "session IP is temporarily blocked"),
+        }.get(code, (502, "upstream API error"))
+        self.google_code = code
+        super().__init__(status, f"Gemini Web {reason} (Google code {code}); response discarded",
+                         60 if code == 1037 else None)
+
+
+def response_metadata(raw):
+    """Read only model IDs and fatal error codes from Google's JSON envelopes.
 
     Lengths are JavaScript UTF-16 code units, not bytes. Never search arbitrary
     response text for model names: user content can contain those same strings.
@@ -106,7 +121,7 @@ def response_model_ids(raw):
     text = raw.decode("utf-8")
     if text.startswith(")]}'"):
         text = text[4:]
-    decoder, ids = json.JSONDecoder(), []
+    decoder, ids, errors = json.JSONDecoder(), [], []
     position = 0
     while position < len(text):
         while position < len(text) and text[position].isspace():
@@ -130,6 +145,16 @@ def response_model_ids(raw):
         if not isinstance(envelope, list):
             raise ValueError()
         for part in envelope:
+            # The library treats this path as fatal, even after earlier parts
+            # contained candidates. Inspect it before releasing any output.
+            try:
+                code = part[5][2][0][1][0]
+            except (IndexError, KeyError, TypeError):
+                code = None
+            if code:
+                if type(code) is not int or not 1 <= code <= 99_999_999:
+                    raise ValueError()
+                errors.append(code)
             if not isinstance(part, list) or len(part) < 3 or part[0] != "wrb.fr" or not isinstance(part[2], str):
                 continue
             inner = json.loads(part[2])
@@ -137,7 +162,11 @@ def response_model_ids(raw):
                 if not isinstance(inner[39], str) or not inner[39]:
                     raise ValueError()
                 ids.append(inner[39])
-    return ids
+    return ids, errors
+
+
+def response_model_ids(raw):
+    return response_metadata(raw)[0]
 
 
 class ModelGuard:
@@ -161,14 +190,18 @@ class ModelGuard:
 
     def inspect(self, raw):
         try:
-            ids = response_model_ids(raw)
+            ids, errors = response_metadata(raw)
         except (ValueError, TypeError, UnicodeError, RecursionError):
             self.error = ModelVerificationError("invalid response metadata")
         else:
-            if not ids:
-                self.error = ModelVerificationError("missing model identifier")
-            elif any(model_id != self.expected for model_id in ids):
+            if any(model_id != self.expected for model_id in ids):
                 self.error = WorkerError(429, "Gemini Web RESOURCE_EXHAUSTED: Google returned a different model; response discarded", 60)
+            elif errors:
+                # A permanent error in the same response prevents a retry,
+                # even if an earlier frame reported temporary error 1013.
+                self.error = GoogleStreamError(next((code for code in errors if code != 1013), errors[0]))
+            elif not ids:
+                self.error = ModelVerificationError("missing model identifier")
             else:
                 self.verified = True
 
@@ -193,8 +226,10 @@ class ModelGuard:
                         raise guard.error
                     raw.extend(chunk)
                 guard.inspect(raw)
-                # Let the library handle explicit quota/auth/protocol errors.
-                # consume_stream checks the guard before emitting even ready.
+                if guard.error and not isinstance(guard.error, ModelVerificationError):
+                    raise guard.error
+                # For unverifiable metadata, let the library identify other
+                # explicit failures; consume_stream still checks before ready.
                 yield bytes(raw)
 
         @contextlib.asynccontextmanager
@@ -421,7 +456,10 @@ async def generate_verified(client, payload, model, emit_event, attachments=()):
             failure = guard.error or error
             # Both attempts require the same Argon ID. No replay is allowed
             # after ready/text/tool output, or for quota/auth/model mismatches.
-            if attempt == 0 and not started and isinstance(failure, ModelVerificationError):
+            temporary = isinstance(failure, GoogleStreamError) and failure.google_code == 1013
+            if attempt == 0 and not started and (isinstance(failure, ModelVerificationError) or temporary):
+                if temporary:
+                    await asyncio.sleep(1)
                 continue
             if failure is error:
                 raise
@@ -571,6 +609,10 @@ def safe_error(error):
         return 403, "Gemini Web session is temporarily blocked"
     if name == "ModelInvalidError":
         return 404, "Gemini Web rejected the selected Argon model; no fallback was used"
+    if name == "APIError":
+        status = getattr(error, "status_code", None)
+        detail = f"HTTP {status}" if type(status) is int and 400 <= status <= 599 else "APIError"
+        return 502, f"Gemini Web upstream API error ({detail}); request failed"
     if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or name == "TimeoutError":
         return 504, "Gemini Web request timed out"
     if isinstance(error, ImportError):
