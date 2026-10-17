@@ -19,6 +19,12 @@ from urllib.parse import urljoin, urlsplit
 from citation_text import CitationText
 from telemetry import CURRENT, phase
 
+try:
+    from gemini_webapi.exceptions import GeminiError
+except ImportError:
+    # Keep validation and dependency-free contract tests usable without the client.
+    GeminiError = Exception
+
 # Mirror GEMINI_WEB_MAX_PROMPT_BYTES in credentials.ts.
 MAX_PROMPT_BYTES = 4 * 1024 * 1024
 # Mirror attachments.ts. No local paths or remote URLs cross this protocol.
@@ -86,7 +92,9 @@ def thinking_transport(client, level):
         original.stream = wrapper.original_stream
 
 
-class WorkerError(Exception):
+class WorkerError(GeminiError):
+    # The pinned client preserves GeminiError; ordinary exceptions are wrapped
+    # as retryable APIError and incur five unnecessary backoff waits.
     def __init__(self, status, message, retry_after=None):
         self.status = status
         self.message = message
