@@ -46,3 +46,5 @@ pnpm-workspace.yaml
 __pycache__/
 *.pyc
 .gemini-web-cache/
+.gemini-web-engine/
+.cache/

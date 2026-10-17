@@ -1,3 +1,11 @@
+## [4.2.0-argon.6]
+
+- Add an opt-in persistent Go Gemini Web engine behind the existing Rotator provider. Preserve structured client history and tool schemas; isolate cached continuations by account, model, thinking level, system instructions and tools.
+- Pin MIT-licensed Gemini-Sentinel sources with a verified SHA-256; keep Rotator changes in overlays and patches. Record zexadev and ikhsan3adi comparison revisions separately.
+- Preserve imported and rotated cookies in private persistent state, stream verified text, validate complete tool calls before release, and bound engine requests to 120 seconds without cross-engine fallback.
+- Include native image/document uploads, image generation and usage/identity probes in the Go boundary. Keep Python as the deployment default until live acceptance checks pass.
+- Build and test the static engine on the PC/CI and include its revision in image provenance. Add a controlled weekly donor-update draft PR workflow alongside tuxevil upstream synchronization.
+
 ## [4.2.0-argon.5]
 
 - Display account quota percentages as integers, truncating fractional digits in quota rows, cards and tooltips.

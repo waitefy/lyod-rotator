@@ -11,6 +11,7 @@ import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
 import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, GEMINI_WEB_MAX_PROMPT_BYTES, getCookiesFile } from "./credentials.js";
 import { createToolBridge, toolDeclarationError, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
+import { matchesToolSchema } from "./tool-schema.js";
 import { apiWebAttachment, checkWebAttachmentTotals, validateWebAttachment, type WebAttachment } from "./attachments.js";
 import { MAX_IMAGE_EVENT_BYTES, validateGeneratedWebImage, webGeminiImageMode, webResponsesImageMode, type GeneratedWebImage } from "./image-output.js";
 
@@ -18,6 +19,12 @@ const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
 const ENDPOINT = "https://gemini.google.com/app";
 const MAX_PROMPT_BYTES = GEMINI_WEB_MAX_PROMPT_BYTES;
 const WORKER_TIMEOUT_MS = 480000;
+
+export function webEngineBackend(): "python" | "go" {
+  const value = process.env.TUXEVIL_ROTATOR_GEMINI_WEB_BACKEND || "python";
+  if (value !== "python" && value !== "go") throw new Error("Invalid Gemini Web backend; use python or go");
+  return value;
+}
 
 export class WebRequestError extends Error {}
 
@@ -196,6 +203,9 @@ export function runWebWorker(
   payload: Record<string, unknown>, signal?: AbortSignal, bridge?: ToolBridge,
 ): Promise<ForwardedResponse & { retryToolCall?: boolean }> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
+  let goEngine: boolean;
+  try { goEngine = webEngineBackend() === "go"; }
+  catch (error) { return Promise.reject(error); }
   return new Promise((resolve, reject) => {
     const startedAt = performance.now();
     const diagnosticId = randomUUID();
@@ -203,11 +213,13 @@ export function runWebWorker(
     let readyMs: number | undefined;
     const logCompletion = (outcome: "done" | "error" | "cancelled", status: number): void => {
       logger.log(outcome === "error" ? "warn" : "info", "gemini-web", JSON.stringify({
-        diagnosticId, operation: payload.mode === "probe" ? "probe" : payload.output === "image" || payload.output === "image-or-text" ? "image" : "text",
+        diagnosticId, backend: goEngine ? "go" : "python", operation: payload.mode === "probe" ? "probe" : payload.output === "image" || payload.output === "image-or-text" ? "image" : "text",
         outcome, status, workerMs: Math.round(performance.now() - startedAt), readyMs, ...telemetry,
       }));
     };
-    const child = spawn(process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3", [WORKER], {
+    const command = goEngine ? process.env.TUXEVIL_ROTATOR_GEMINI_WEB_ENGINE || "/usr/local/bin/rotator-gemini-engine"
+      : process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3";
+    const child = spawn(command, goEngine ? [] : [WORKER], {
       stdio: ["pipe", "pipe", "ignore"],
     });
     const output = new PassThrough();
@@ -219,6 +231,7 @@ export function runWebWorker(
     let settled = false;
     let buffered = "";
     let streamedText = false;
+    let engineTools: Record<string, unknown>[] | undefined;
     const imageMode = payload.output === "image" || payload.output === "image-or-text";
     let image: GeneratedWebImage | undefined;
     const cleanup = (): void => {
@@ -260,12 +273,12 @@ export function runWebWorker(
       output.destroy(error);
       if (!settled) { settled = true; reject(error); }
     };
-    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), WORKER_TIMEOUT_MS);
+    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), goEngine ? 125000 : WORKER_TIMEOUT_MS);
     timeout.unref();
     signal?.addEventListener("abort", abort, { once: true });
     // A cancelled Response body must terminate the upstream worker too.
     output.on("close", () => { if (!done) abort(); });
-    child.on("error", () => fail(503, "Gemini Web Python worker unavailable; install its dependencies"));
+    child.on("error", () => fail(503, goEngine ? "Gemini Web Go engine unavailable; build or install it" : "Gemini Web Python worker unavailable; install its dependencies"));
     child.stdin.on("error", () => fail(502, "Gemini Web worker stopped before receiving the request"));
     lines.on("line", (line) => {
       if (done) return;
@@ -288,7 +301,24 @@ export function runWebWorker(
           if (!bridge && !imageMode && payload.mode !== "probe") startResponse();
         } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
           image = validateGeneratedWebImage(event);
+        } else if (event.type === "tools" && goEngine && ready && bridge && !imageMode && !engineTools) {
+          if (!Array.isArray(event.calls) || !event.calls.length || event.calls.length > 64 || !isRecord(payload.engineRequest)) throw new Error("invalid engine tools");
+          const declarations = toolDeclarations(payload.engineRequest);
+          const config = isRecord(payload.engineRequest.toolConfig) ? payload.engineRequest.toolConfig.functionCallingConfig : undefined;
+          engineTools = event.calls.map((call: unknown) => {
+            if (!isRecord(call) || typeof call.name !== "string" || !isRecord(call.args)) throw new Error("invalid engine tool");
+            const declaration = declarations.find((tool) => tool.name === call.name);
+            if (!declaration || !matchesToolSchema(call.args, declaration.parameters ?? { type: "object" }) ||
+                (isRecord(config) && Array.isArray(config.allowedFunctionNames) && !config.allowedFunctionNames.includes(call.name))) throw new Error("invalid engine tool");
+            return { functionCall: { name: call.name, args: call.args } };
+          });
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
+          if (goEngine && !imageMode) {
+            if (!settled) startResponse();
+            streamedText = true;
+            writeText(event.text);
+            return;
+          }
           if (imageMode || (bridge && !streamedText)) {
             buffered += event.text;
             if (buffered.length > 128000) throw new Error("output limit");
@@ -316,7 +346,10 @@ export function runWebWorker(
             startResponse();
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: image ? [{ inlineData: image }] : [{ text: buffered }] } }] })}\n\n`);
           }
-          if (bridge && !streamedText) {
+          if (goEngine && engineTools) {
+            if (!settled) startResponse();
+            output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: engineTools } }] })}\n\n`);
+          } else if (bridge && !streamedText) {
             if (event.truncated) { fail(502, "Gemini Web tool response exceeded the output limit"); return; }
             let part: Record<string, unknown>;
             try { part = bridge.parse(buffered); }
@@ -354,7 +387,7 @@ export async function forwardRequest(
         bridge = createToolBridge(declarations, isRecord(config) ? {
           mode: String(config.mode), allowedFunctionNames: config.allowedFunctionNames as string[] | undefined,
         } : undefined);
-        prompt += `\n\n${bridge.instruction}`;
+        if (webEngineBackend() === "python") prompt += `\n\n${bridge.instruction}`;
         if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError(`Gemini Web text context is limited to ${MAX_PROMPT_BYTES} UTF-8 bytes`);
       }
     }
@@ -362,7 +395,7 @@ export async function forwardRequest(
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
   const payload = {
     mode: "generate", streamText: true, ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
-    proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
+    proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER), engineRequest: body.request,
   };
   const result = await runWebWorker(payload, signal, bridge);
   if (!result.retryToolCall || !bridge) return result;

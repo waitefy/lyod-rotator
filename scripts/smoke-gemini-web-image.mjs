@@ -18,6 +18,7 @@ const docker = (...args) => execFileSync("docker", args, {
 const root = new URL("../", import.meta.url);
 const expectedVersion = JSON.parse(readFileSync(new URL("package.json", root), "utf8")).version;
 const expectedBase = JSON.parse(readFileSync(new URL("fork-base.json", root), "utf8"));
+const expectedEngine = JSON.parse(readFileSync(new URL("gemini-engine.json", root), "utf8")).engine;
 const expectedClient = readFileSync(new URL("requirements-gemini-web.txt", root), "utf8")
   .match(/gemini-webapi\s*@\s*git\+[^\s]+@([a-f0-9]{40})/)[1];
 const name = `rotator-argon-smoke-${randomUUID()}`;
@@ -45,6 +46,8 @@ try {
   assert.equal(info.version, expectedVersion);
   assert.deepEqual(info.upstream, expectedBase);
   assert.equal(info.geminiWebapi.commit, expectedClient);
+  assert.deepEqual(info.geminiEngine, expectedEngine);
+  assert.equal(docker("exec", name, "/usr/local/bin/rotator-gemini-engine", "--version"), expectedEngine.commit);
   const expectedCommit = process.env.ROTATOR_EXPECTED_COMMIT || process.env.GITHUB_SHA;
   if (expectedCommit) assert.equal(info.source.commit, expectedCommit);
   const nodeMajor = Number(docker("exec", name, "node", "-p", "process.versions.node.split('.')[0]"));

@@ -1,0 +1,52 @@
+name: Argon engine update proposal
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: argon-engine-sync
+  cancel-in-progress: false
+jobs:
+  propose:
+    if: github.event_name == 'workflow_dispatch' || vars.ARGON_UPSTREAM_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/gemini-sentinel/go.mod
+          cache-dependency-path: third_party/gemini-sentinel/go.sum
+      - name: Prepare pinned donor update
+        id: update
+        run: |
+          commit="$(git ls-remote https://github.com/Sonesh-2202/Gemini-Sentinel.git HEAD | cut -f1)"
+          node scripts/update-gemini-engine.mjs "$commit"
+      - name: Verify patch compatibility and engine contracts
+        if: steps.update.outputs.changed == 'true'
+        env:
+          ROTATOR_ENGINE_TEST: '1'
+          CGO_ENABLED: '0'
+        run: node scripts/build-gemini-engine.mjs "$RUNNER_TEMP/rotator-gemini-engine"
+      - name: Open update for review; never merge or deploy automatically
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          branch: sync/gemini-web-engine
+          title: Update pinned Gemini Web engine
+          commit-message: Update pinned Gemini Web engine
+          draft: true
+          body: |
+            Update the pinned Sentinel source while retaining Rotator overlays and MIT notices.
+            Patch application, Go contracts and binary build passed before this draft was opened.
+            Full Argon CI, review and live text/tool/attachment checks are required before promotion.
+            This workflow does not merge or deploy the update.

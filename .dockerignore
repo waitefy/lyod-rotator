@@ -11,3 +11,6 @@ __pycache__
 **/__pycache__
 .gemini-web-cache
 **/.gemini-web-cache
+.gemini-web-engine
+**/.gemini-web-engine
+.cache
