@@ -11,11 +11,12 @@ from citation_text import CitationText, render_citations
 
 class CitationTest(unittest.TestCase):
     def test_single_image_dead_reference_is_removed(self):
-        self.assertEqual(render_citations("Красное сердце[cite: 1].", [], single_image=True), "Красное сердце.")
+        for marker in ("[cite: 1]", "[cite: 2]", "[cite: 27]", "[cite: 1, 2]"):
+            with self.subTest(marker=marker):
+                self.assertEqual(render_citations(f"Красное сердце{marker}.", [], single_image=True), "Красное сердце.")
 
     def test_unknown_sources_and_multiple_images_are_not_guessed(self):
-        for single in (False, True):
-            self.assertEqual(render_citations("Сравнение[cite: 2].", [], single_image=single), "Сравнение[cite: 2].")
+        self.assertEqual(render_citations("Сравнение[cite: 2].", [], single_image=False), "Сравнение[cite: 2].")
         self.assertEqual(render_citations("Источник[cite: 1].", []), "Источник[cite: 1].")
 
     def test_web_sources_survive_an_image_request(self):
@@ -65,7 +66,7 @@ class CitationTest(unittest.TestCase):
 
     def test_worker_removes_image_reference_but_preserves_tool_file_contents(self):
         call = 'ROTATOR_TOOL_12345678-1234-1234-1234-123456789abc{"arguments":{"content":"[cite: 1]"}}'
-        for text, expected in [('Heart[cite: 1].', 'Heart.'), (call, call)]:
+        for text, expected in [('Heart[cite: 1].', 'Heart.'), ('House[cite: 2].', 'House.'), (call, call)]:
             events = []
             client = Client([], list(text))
             payload = {'prompt': 'Describe', 'attachments': [{'mimeType': 'image/png'}]}

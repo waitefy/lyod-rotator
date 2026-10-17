@@ -44,8 +44,9 @@ def render_citations(text, citations, *, single_image=False):
         if all(number in sources for number in numbers):
             return " ".join(sources[number] for number in dict.fromkeys(numbers))
         # An unresolvable reference adds nothing to a one-image description.
-        # Do not infer image indexes or discard unresolved web sources.
-        if single_image and not citations and numbers == [1]:
+        # The numeric marker is not a reliable attachment index. Keep source
+        # metadata authoritative; never invent a URL for a missing source.
+        if single_image and not citations:
             return ""
         return match.group()
 
