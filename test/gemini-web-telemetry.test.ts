@@ -17,3 +17,14 @@ test("worker telemetry drops arbitrary strings, fractional, oversized and nonfin
     sessionMs: -1, googleRequests: true }), { timingsMs: {} });
   for (const value of [null, [], "cookie"]) assert.deepEqual(workerTelemetry(value), {});
 });
+
+test("worker telemetry accepts bounded Google milestones and drops malformed values", () => {
+  assert.deepEqual(workerTelemetry({ timingsMs: {
+    googleHeaders: 125, googleFirstChunk: 375, googleStreamEnd: 1250,
+  } }), { timingsMs: { googleHeaders: 125, googleFirstChunk: 375, googleStreamEnd: 1250 } });
+  for (const invalid of ["private-header", true, -1, 1.5, Infinity, NaN, 3600001]) {
+    assert.deepEqual(workerTelemetry({ timingsMs: {
+      googleHeaders: invalid, googleFirstChunk: invalid, googleStreamEnd: invalid,
+    } }), { timingsMs: {} });
+  }
+});

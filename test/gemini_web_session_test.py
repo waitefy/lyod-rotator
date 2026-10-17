@@ -68,6 +68,40 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clients[0].generation_calls, 1)
         self.assertNotIn("private answer", json.dumps(report))
 
+    async def test_google_milestones_measure_from_post_start_without_releasing_unverified_output(self):
+        events = []
+        with patch.object(session.worker, "monotonic", side_effect=[10, 10.125, 10.375, 11.25]):
+            await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        timings = events[-2]["timingsMs"]
+        self.assertEqual(timings["googleHeaders"], 125)
+        self.assertEqual(timings["googleFirstChunk"], 375)
+        self.assertEqual(timings["googleStreamEnd"], 1250)
+        self.assertEqual([e["type"] for e in events], ["ready", "delta", "diagnostic", "done"])
+
+    async def test_interrupted_stream_records_first_nonempty_chunk_without_claiming_completion(self):
+        client = Client([model("argon")], [])
+
+        @contextlib.asynccontextmanager
+        async def stream(*args, **kwargs):
+            async def content():
+                yield b""
+                yield b")]}'\n"
+                raise OSError("private-upstream-content")
+            yield SimpleNamespace(status_code=200, aiter_content=content)
+
+        client.client.stream = stream
+        self.session.client_factory = lambda *args, **kwargs: client
+        events = []
+        with patch.object(session.worker, "monotonic", side_effect=[10, 10.125, 10.375]):
+            with self.assertRaises(OSError):
+                await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        self.assertEqual([e["type"] for e in events], ["diagnostic"])
+        report = events[0]
+        self.assertEqual(report["timingsMs"]["googleHeaders"], 125)
+        self.assertEqual(report["timingsMs"]["googleFirstChunk"], 375)
+        self.assertNotIn("googleStreamEnd", report["timingsMs"])
+        self.assertNotIn("private-upstream-content", json.dumps(report))
+
     async def test_unknown_exception_text_and_class_name_are_not_logged(self):
         class SecretTokenInClassName(Exception):
             pass
@@ -89,10 +123,15 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
         client.response_sequence = [(None, b")]}'\n"), (client.served_model_id, None)]
         self.session.client_factory = lambda *a, **k: client
         events = []
-        await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        with patch.object(session.worker, "monotonic", side_effect=[10, 10.125, 10.375, 11.25,
+                                                                   20, 20.125, 20.375, 21.25]):
+            await self.session.execute({**self.payload, "diagnostics": True}, events.append)
         report = events[-2]
         self.assertEqual(report["attempts"], 2)
         self.assertEqual(report["googleRequests"], 2)
+        self.assertEqual(report["timingsMs"]["googleHeaders"], 250)
+        self.assertEqual(report["timingsMs"]["googleFirstChunk"], 750)
+        self.assertEqual(report["timingsMs"]["googleStreamEnd"], 2500)
         self.assertNotIn("failedStage", report)
         self.assertNotIn("errorKind", report)
 

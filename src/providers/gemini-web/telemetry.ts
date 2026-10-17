@@ -1,6 +1,6 @@
 import { isRecord } from "../../compat/schema-sanitizer.js";
 
-const STAGES = ["session", "sessionWait", "fileLock", "init", "modelSelection", "quota", "generation", "googleRequest", "imageDownload", "persist"];
+const STAGES = ["session", "sessionWait", "fileLock", "init", "modelSelection", "quota", "generation", "googleRequest", "googleHeaders", "googleFirstChunk", "googleStreamEnd", "imageDownload", "persist"];
 const ERROR_KINDS = ["unknown", "WorkerError", "GoogleStreamError", "ModelVerificationError", "AuthError",
   "UsageLimitExceededError", "TemporarilyBlockedError", "ModelInvalidError", "APIError", "TimeoutError",
   "CancelledError", "ConnectionError", "OSError", "CurlError", "ImportError", "ModuleNotFoundError"];

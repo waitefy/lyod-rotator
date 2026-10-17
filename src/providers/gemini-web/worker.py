@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from time import monotonic
 from urllib.parse import urljoin, urlsplit
 
 from citation_text import CitationText
@@ -221,19 +222,24 @@ class ModelGuard:
         guard = self
 
         class Response:
-            def __init__(self, response):
-                self.response = response
+            def __init__(self, response, mark):
+                self.response, self.mark = response, mark
 
             def __getattr__(self, name):
                 return getattr(self.response, name)
 
             async def aiter_content(self, *args, **kwargs):
                 raw = bytearray()
+                first = True
                 async for chunk in self.response.aiter_content(*args, **kwargs):
+                    if first and chunk:
+                        self.mark("googleFirstChunk")
+                        first = False
                     if len(raw) + len(chunk) > MAX_UPSTREAM_BYTES:
                         guard.error = WorkerError(502, "Gemini Web response exceeds the verification limit")
                         raise guard.error
                     raw.extend(chunk)
+                self.mark("googleStreamEnd")
                 guard.inspect(raw)
                 if guard.error and not isinstance(guard.error, ModelVerificationError):
                     raise guard.error
@@ -248,11 +254,20 @@ class ModelGuard:
                 if guard.error:
                     raise guard.error
                 guard.verified = False
-            if generate and CURRENT.get() is not None:
-                CURRENT.get().google_requests += 1
+            trace = CURRENT.get() if generate else None
+            started = monotonic() if trace is not None else 0
+            if trace is not None:
+                trace.google_requests += 1
+
+            def mark(name):
+                if trace is not None:
+                    elapsed = max(0, round((monotonic() - started) * 1000))
+                    trace.timings[name] = trace.timings.get(name, 0) + elapsed
+
             with phase("googleRequest") if generate else contextlib.nullcontext():
                 async with original_stream(method, url, **kwargs) as response:
-                    yield Response(response) if generate and response.status_code == 200 else response
+                    mark("googleHeaders")
+                    yield Response(response, mark) if generate and response.status_code == 200 else response
 
         self.client, self.original, self.stream = client, original, stream
         original.stream = stream
