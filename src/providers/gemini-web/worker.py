@@ -180,6 +180,16 @@ def _response_metadata(text, *, partial=False):
             if not isinstance(part, list) or len(part) < 3 or part[0] != "wrb.fr" or not isinstance(part[2], str):
                 continue
             inner = json.loads(part[2])
+            trace = CURRENT.get()
+            # Same text path as the pinned client's _parse_candidate(). Only
+            # record arrival time; never retain candidate text in telemetry.
+            if trace is not None and isinstance(inner, list) and len(inner) > 4 and isinstance(inner[4], list):
+                for candidate in inner[4]:
+                    if (isinstance(candidate, list) and len(candidate) > 1 and candidate[0]
+                            and isinstance(candidate[1], list) and candidate[1]
+                            and isinstance(candidate[1][0], str) and candidate[1][0]):
+                        trace.mark("firstWireText", once=True)
+                        break
             if isinstance(inner, list) and len(inner) > 39 and inner[39] is not None:
                 if not isinstance(inner[39], str) or not inner[39]:
                     raise ValueError()
@@ -265,6 +275,8 @@ class ModelGuard:
                 metadata = ""
                 first = True
                 async for chunk in self.response.aiter_content(*args, **kwargs):
+                    if chunk and (trace := CURRENT.get()) is not None:
+                        trace.mark("lastWireChunk")
                     if first and chunk:
                         self.mark("googleFirstChunk")
                         first = False

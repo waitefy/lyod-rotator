@@ -20,6 +20,7 @@ class Trace:
         self.failed_stage = None
         self.attempts = 0
         self.google_requests = 0
+        self.active_phases = []
 
     def mark(self, name, *, once=False):
         """Record a milestone from session start, retaining first events on retry."""
@@ -29,6 +30,8 @@ class Trace:
     @contextlib.contextmanager
     def phase(self, name):
         started = time.monotonic()
+        entry = (name, started)
+        self.active_phases.append(entry)
         try:
             yield
         except BaseException:
@@ -36,12 +39,19 @@ class Trace:
                 self.failed_stage = name
             raise
         finally:
+            self.active_phases.remove(entry)
             self.timings[name] = self.timings.get(name, 0) + max(0, round((time.monotonic() - started) * 1000))
 
     def event(self, error=None):
-        result = {"type": "diagnostic", "timingsMs": dict(self.timings),
-                  "sessionMs": max(0, round((time.monotonic() - self.started) * 1000)),
+        now = time.monotonic()
+        timings = dict(self.timings)
+        for name, started in self.active_phases:
+            timings[name] = timings.get(name, 0) + max(0, round((now - started) * 1000))
+        result = {"type": "diagnostic", "timingsMs": timings,
+                  "sessionMs": max(0, round((now - self.started) * 1000)),
                   "attempts": self.attempts, "googleRequests": self.google_requests}
+        if self.active_phases:
+            result["activeStage"] = self.active_phases[-1][0]
         if error is not None:
             name = type(error).__name__
             result["errorKind"] = name if name in ERROR_KINDS else "unknown"

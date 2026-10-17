@@ -36,3 +36,10 @@ test("worker telemetry preserves content milestones and verification duration wi
     assert.deepEqual(workerTelemetry({ timingsMs: Object.fromEntries(Object.keys(timings).map(key => [key, invalid])) }), { timingsMs: {} });
   }
 });
+
+test("inflight telemetry accepts only known stages and bounded wire milestones", () => {
+  assert.deepEqual(workerTelemetry({ activeStage: "googleRequest", timingsMs: {
+    firstWireText: 125, lastWireChunk: 375, googleRequest: 500,
+  } }), { activeStage: "googleRequest", timingsMs: { googleRequest: 500, firstWireText: 125, lastWireChunk: 375 } });
+  assert.deepEqual(workerTelemetry({ activeStage: "private-url", timingsMs: { firstWireText: "private-text", lastWireChunk: -1 } }), { timingsMs: {} });
+});

@@ -1,7 +1,7 @@
 import { isRecord } from "../../compat/schema-sanitizer.js";
 
 const STAGES = ["session", "sessionWait", "fileLock", "init", "modelSelection", "quota", "generation", "googleRequest", "googleHeaders", "googleFirstChunk", "googleStreamEnd",
-  "firstText", "responseStreamEnd", "modelVerification", "modelVerified", "firstOutput", "imageDownload", "persist"];
+  "firstWireText", "lastWireChunk", "firstText", "responseStreamEnd", "modelVerification", "modelVerified", "firstOutput", "imageDownload", "persist"];
 const ERROR_KINDS = ["unknown", "WorkerError", "GoogleStreamError", "ModelVerificationError", "AuthError",
   "UsageLimitExceededError", "TemporarilyBlockedError", "ModelInvalidError", "APIError", "TimeoutError",
   "CancelledError", "ConnectionError", "OSError", "CurlError", "ImportError", "ModuleNotFoundError"];
@@ -24,5 +24,6 @@ export function workerTelemetry(value: unknown): Record<string, unknown> {
   }
   if (typeof value.errorKind === "string" && ERROR_KINDS.includes(value.errorKind)) result.errorKind = value.errorKind;
   if (typeof value.failedStage === "string" && STAGES.includes(value.failedStage)) result.failedStage = value.failedStage;
+  if (typeof value.activeStage === "string" && STAGES.includes(value.activeStage)) result.activeStage = value.activeStage;
   return result;
 }

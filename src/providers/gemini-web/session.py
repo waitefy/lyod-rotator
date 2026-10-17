@@ -17,6 +17,7 @@ from telemetry import CURRENT, Trace, phase
 # Leave time for cleanup before the stdio worker's 480-second watchdog fires.
 SESSION_REQUEST_TIMEOUT_SECONDS = 450
 CLIENT_CLOSE_TIMEOUT_SECONDS = 5
+DIAGNOSTIC_INTERVAL_SECONDS = 1
 
 
 def session_paths(payload):
@@ -87,12 +88,19 @@ class Session:
             if event["type"] == "done":
                 send(trace.event())
             send(event)
+        async def report_progress():
+            while True:
+                await asyncio.sleep(DIAGNOSTIC_INTERVAL_SECONDS)
+                send(trace.event())
+        reporter = asyncio.create_task(report_progress())
         try:
             return await self._execute(payload, emit)
         except BaseException as error:
             send(trace.event(error))
             raise
         finally:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
             CURRENT.reset(token)
 
     async def _execute(self, payload, send):

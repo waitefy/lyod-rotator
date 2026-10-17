@@ -20,6 +20,7 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { removeAccountFromConfig } from "../src/account-store.js";
 import { initDb } from "../src/db-store.js";
+import { logger } from "../src/logger.js";
 
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
   type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 }, i: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["path", "i"],
@@ -261,6 +262,31 @@ for event in [{'type':'ready'},{'type':'delta','text':'ok'},{'type':'diagnostic'
       assert.match(text, /"text":"ok"/);
       assert.doesNotMatch(text, /diagnostic|private-cookie|private-prompt|googleCode|timingsMs/);
     });
+  });
+
+  it("retains the last safe inflight snapshot when the client aborts", async () => {
+    const logs: unknown[] = [];
+    const previous = logger.log;
+    logger.log = (_level, scope, message) => { if (scope === "gemini-web") logs.push(message); };
+    try {
+      await fakePython(`import json,sys,time
+json.load(sys.stdin)
+for event in [{'type':'diagnostic','activeStage':'googleRequest','googleRequests':1,'timingsMs':{'firstWireText':40,'googleRequest':100},'cookies':'private-cookie'}, {'type':'ready'}]:
+ print(json.dumps(event),flush=True)
+time.sleep(60)`, async () => {
+        const controller = new AbortController();
+        const { response } = await runWebWorker({ mode: "generate", prompt: "private-prompt" }, controller.signal);
+        controller.abort();
+        await assert.rejects(response.text());
+        assert.equal(logs.length, 1);
+        const report = JSON.parse(String(logs[0]));
+        assert.equal(report.outcome, "cancelled");
+        assert.equal(report.activeStage, "googleRequest");
+        assert.equal(report.googleRequests, 1);
+        assert.equal(report.timingsMs.firstWireText, 40);
+        assert.doesNotMatch(JSON.stringify(report), /private-cookie|private-prompt|cookies/);
+      });
+    } finally { logger.log = previous; }
   });
 
   it("rejects malformed tool calls before committing HTTP 200", async () => {

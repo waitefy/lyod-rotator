@@ -49,6 +49,57 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, serialized)
         self.assertIsNone(session.CURRENT.get())
 
+    async def test_inflight_diagnostics_survive_disconnect_before_final_report(self):
+        events, reported = [], asyncio.Event()
+
+        async def stalled_run(*args, **kwargs):
+            trace = session.CURRENT.get()
+            trace.google_requests += 1
+            with session.phase("generation"), session.phase("googleRequest"):
+                trace.mark("firstWireText")
+                await asyncio.Event().wait()
+
+        def send(event):
+            events.append(event)
+            reported.set()
+
+        with patch.object(session.worker, "run", stalled_run), \
+                patch.object(session, "DIAGNOSTIC_INTERVAL_SECONDS", .005, create=True):
+            task = asyncio.create_task(self.session.execute({**self.payload, "diagnostics": True}, send))
+            try:
+                await asyncio.wait_for(reported.wait(), .2)
+                report = events[0]
+                self.assertEqual(report["type"], "diagnostic")
+                self.assertEqual(report["activeStage"], "googleRequest")
+                self.assertEqual(report["googleRequests"], 1)
+                self.assertIn("firstWireText", report["timingsMs"])
+                self.assertGreater(report["timingsMs"]["googleRequest"], 0)
+                for secret in (self.payload["prompt"], str(self.cookies), "__Secure"):
+                    self.assertNotIn(secret, json.dumps(report))
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self.assertFalse(self.session.lock.locked())
+
+    async def test_wire_text_milestone_requires_a_complete_candidate_frame(self):
+        trace = session.Trace()
+        inner = [None] * 40
+        inner[4] = [["candidate-id", ["private answer"]]]
+        envelope = json.dumps([["wrb.fr", None, json.dumps(inner)]])
+        frame = str(len(envelope) + 2) + "\n" + envelope + "\n"
+        token = session.CURRENT.set(trace)
+        try:
+            session.worker._response_metadata(frame[:-2], partial=True)
+            self.assertNotIn("firstWireText", trace.timings)
+            session.worker._response_metadata(frame, partial=True)
+            first = trace.timings["firstWireText"]
+            session.worker._response_metadata(frame, partial=True)
+            self.assertEqual(trace.timings["firstWireText"], first)
+            self.assertNotIn("private answer", json.dumps(trace.event()))
+        finally:
+            session.CURRENT.reset(token)
+
     async def test_google_1100_is_diagnosed_without_replaying_image_generation(self):
         def factory(*args, **kwargs):
             client = Client([model("argon")], ["private answer"])
