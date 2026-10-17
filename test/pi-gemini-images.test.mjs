@@ -96,3 +96,47 @@ test("honors cancellation and rejects other providers before making requests", a
     assert.deepEqual(await readdir(ctx.cwd), []);
   });
 });
+
+test("uploads the actual reference image through Responses and saves the result separately", async () => {
+  await fixture(async ({ ctx, calls, reply }) => {
+    const source = join(ctx.cwd, "night.png");
+    await writeFile(source, png);
+    reply(200, { status: "completed", output: [{ type: "image_generation_call", status: "completed", result: png.toString("base64"), output_format: "png" }] });
+    const result = await generateImage({ prompt: "Make this scene daytime", reference_image: "night.png", filename: "day" }, ctx);
+    assert.deepEqual(calls, [{ url: "/v1/responses", authorization: "Bearer private-test-token", body: {
+      model: ctx.model.id, store: false, stream: false, tools: [{ type: "image_generation" }], tool_choice: "required",
+      input: [{ role: "user", content: [{ type: "input_text", text: "Make this scene daytime" },
+        { type: "input_image", image_url: `data:image/png;base64,${png.toString("base64")}` }] }],
+    } }]);
+    assert.deepEqual(await readFile(source), png);
+    assert.deepEqual(await readFile(result.details.path), png);
+    assert.equal(result.details.path, join(ctx.cwd, "day.png"));
+    await assert.rejects(generateImage({ prompt: "day", reference_image: source, filename: "night" }, ctx), /already exists/);
+    assert.deepEqual(await readFile(source), png);
+  });
+});
+
+test("rejects unreadable, non-image, non-file and oversized references before contacting the API", async () => {
+  await fixture(async ({ ctx, calls }) => {
+    await writeFile(join(ctx.cwd, "text.png"), "not an image");
+    await writeFile(join(ctx.cwd, "huge.png"), Buffer.alloc(5 * 1024 * 1024 + 1));
+    for (const reference_image of ["missing.png", "text.png", "huge.png", ".", "", null, 1]) {
+      await assert.rejects(generateImage({ prompt: "day", reference_image }, ctx), /reference|Reference/);
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("rejects missing, incomplete, duplicate or incorrectly labelled Responses images", async () => {
+  await fixture(async ({ ctx, reply }) => {
+    await writeFile(join(ctx.cwd, "source.png"), png);
+    const image = { type: "image_generation_call", status: "completed", result: png.toString("base64"), output_format: "png" };
+    for (const body of [{}, { data: [{ b64_json: png.toString("base64") }] },
+      { status: "in_progress", output: [image] }, { status: "completed", output: [{ ...image, status: "in_progress" }] },
+      { status: "completed", output: [image, image] }, { status: "completed", output: [{ ...image, output_format: "jpeg" }] }]) {
+      reply(200, body);
+      await assert.rejects(generateImage({ prompt: "day", reference_image: "source.png", filename: "day" }, ctx), /image/i);
+      assert.deepEqual(await readdir(ctx.cwd), ["source.png"]);
+    }
+  });
+});
