@@ -102,6 +102,83 @@ class SessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("googleStreamEnd", report["timingsMs"])
         self.assertNotIn("private-upstream-content", json.dumps(report))
 
+    async def test_content_milestones_distinguish_buffering_verification_and_interruption(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                clock, events = [10.0], []
+
+                class LiveClient(Client):
+                    @contextlib.asynccontextmanager
+                    async def http_stream(client, *args, **kwargs):
+                        inner = [None] * 43
+                        inner[39] = client.served_model_id
+                        envelope = json.dumps([["wrb.fr", None, json.dumps(inner)]])
+                        frame = (str(len(envelope) + 2) + "\n" + envelope + "\n").encode()
+
+                        async def content():
+                            clock[0] = 10.1
+                            yield b")]}'\n"
+                            clock[0] = 10.6
+                            yield frame
+                            clock[0] = 11.2
+                            if interrupted:
+                                raise OSError("private stream content")
+                        yield SimpleNamespace(status_code=200, aiter_content=content)
+
+                    async def generate_content_stream(client, prompt, *, model, temporary):
+                        async with client.client.stream("POST", session.worker.GENERATE_ENDPOINT) as response:
+                            async for chunk in response.aiter_content():
+                                if chunk != b")]}'\n":
+                                    yield SimpleNamespace(text_delta="private answer")
+                                    self.assertEqual(events, [])
+
+                client = LiveClient([model("argon")], [])
+                self.session.client_factory = lambda *a, **k: client
+                inspect = session.worker.ModelGuard.inspect
+
+                def timed_inspect(guard, raw):
+                    inspect(guard, raw)
+                    clock[0] += .05
+
+                with patch("telemetry.time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch.object(session.worker.ModelGuard, "inspect", timed_inspect):
+                    if interrupted:
+                        with self.assertRaises(OSError):
+                            await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+                    else:
+                        await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+                report = events[-1] if interrupted else events[-2]
+                timings = report["timingsMs"]
+                self.assertEqual(timings["firstText"], 600)
+                if interrupted:
+                    self.assertEqual([e["type"] for e in events], ["diagnostic"])
+                    for name in ("responseStreamEnd", "modelVerification", "modelVerified", "firstOutput"):
+                        self.assertNotIn(name, timings)
+                else:
+                    self.assertEqual(timings["responseStreamEnd"], 1200)
+                    self.assertEqual(timings["modelVerification"], 50)
+                    self.assertEqual(timings["modelVerified"], 1250)
+                    self.assertEqual(timings["firstOutput"], 1250)
+                    self.assertEqual([e["type"] for e in events], ["ready", "delta", "diagnostic", "done"])
+                    await self.session.close_client()
+                self.assertNotIn("private", json.dumps(report))
+
+    async def test_first_text_milestone_survives_a_verification_retry(self):
+        client = Client([model("argon")], ["private answer"])
+        client.response_sequence = [(None, b")]}'\n"), (client.served_model_id, None)]
+        self.session.client_factory = lambda *a, **k: client
+        trace = session.Trace()
+        trace.started = 10
+        with patch("telemetry.time", SimpleNamespace(monotonic=lambda: 10 + client.generation_calls)), \
+                patch.object(session, "Trace", return_value=trace):
+            events = []
+            await self.session.execute({**self.payload, "diagnostics": True}, events.append)
+        report = events[-2]
+        self.assertEqual(report["attempts"], 2)
+        self.assertEqual(report["timingsMs"]["firstText"], 1000)
+        self.assertEqual(report["timingsMs"]["firstOutput"], 2000)
+        self.assertNotIn("private answer", json.dumps(report))
+
     async def test_unknown_exception_text_and_class_name_are_not_logged(self):
         class SecretTokenInClassName(Exception):
             pass

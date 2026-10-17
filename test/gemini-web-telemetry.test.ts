@@ -28,3 +28,11 @@ test("worker telemetry accepts bounded Google milestones and drops malformed val
     } }), { timingsMs: {} });
   }
 });
+
+test("worker telemetry preserves content milestones and verification duration without accepting private fields", () => {
+  const timings = { firstText: 600, responseStreamEnd: 1200, modelVerification: 50, modelVerified: 1250, firstOutput: 1250 };
+  assert.deepEqual(workerTelemetry({ timingsMs: { ...timings, prompt: "private", cookies: "private" } }), { timingsMs: timings });
+  for (const invalid of ["private", true, -1, 1.5, Infinity, NaN, 3600001]) {
+    assert.deepEqual(workerTelemetry({ timingsMs: Object.fromEntries(Object.keys(timings).map(key => [key, invalid])) }), { timingsMs: {} });
+  }
+});

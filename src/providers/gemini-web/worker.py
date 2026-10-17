@@ -210,6 +210,9 @@ class ModelGuard:
             raise WorkerError(502, "Gemini Web generation transport changed; response discarded")
         if not self.verified:
             raise WorkerError(502, "Gemini Web response model could not be verified; response discarded")
+        trace = CURRENT.get()
+        if trace is not None:
+            trace.mark("modelVerified")
 
     def inspect(self, raw):
         try:
@@ -274,7 +277,11 @@ class ModelGuard:
                     # failure before permitting the adapter's single retry.
                     yield b"" if temporary else chunk
                 self.mark("googleStreamEnd")
-                guard.inspect(raw)
+                trace = CURRENT.get()
+                if trace is not None:
+                    trace.mark("responseStreamEnd")
+                with phase("modelVerification"):
+                    guard.inspect(raw)
                 if guard.error and not isinstance(guard.error, ModelVerificationError):
                     raise guard.error
                 # consume_stream buffers parsed output until this check finishes.
@@ -508,6 +515,9 @@ async def generate_verified(client, payload, model, emit_event, attachments=()):
     def forward_event(event):
         nonlocal started
         started = True
+        trace = CURRENT.get()
+        if trace is not None and event.get("type") == "delta" and event.get("text"):
+            trace.mark("firstOutput", once=True)
         emit_event(event)
 
     for attempt in range(2):
@@ -582,6 +592,9 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
                 if payload.get("output") == "image":
                     return
             delta = output.text_delta or ""
+            trace = CURRENT.get()
+            if trace is not None and delta:
+                trace.mark("firstText", once=True)
             remaining = MAX_OUTPUT_CHARS - count
             text = delta[:remaining]
             count += len(text)

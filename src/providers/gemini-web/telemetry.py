@@ -21,6 +21,11 @@ class Trace:
         self.attempts = 0
         self.google_requests = 0
 
+    def mark(self, name, *, once=False):
+        """Record a milestone from session start, retaining first events on retry."""
+        if not once or name not in self.timings:
+            self.timings[name] = max(0, round((time.monotonic() - self.started) * 1000))
+
     @contextlib.contextmanager
     def phase(self, name):
         started = time.monotonic()
