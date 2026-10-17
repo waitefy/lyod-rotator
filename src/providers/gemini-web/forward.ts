@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { PassThrough, Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { AccountRuntime } from "../../types.js";
+import { logger } from "../../logger.js";
+import { workerTelemetry } from "./telemetry.js";
 import type { ForwardedResponse, RequestBody } from "../../proxy.js";
 import { isRecord } from "../../compat/schema-sanitizer.js";
 import { getProviderProxyUrl } from "../credential-helpers.js";
 import { getWebThinkingLevel, GEMINI_WEB_PROVIDER, GEMINI_WEB_MAX_PROMPT_BYTES, getCookiesFile } from "./credentials.js";
 import { createToolBridge, toolDeclarationError, toolDeclarations, type ToolBridge } from "./tool-bridge.js";
+import { matchesToolSchema } from "./tool-schema.js";
 import { apiWebAttachment, checkWebAttachmentTotals, validateWebAttachment, type WebAttachment } from "./attachments.js";
 import { MAX_IMAGE_EVENT_BYTES, validateGeneratedWebImage, webGeminiImageMode, webResponsesImageMode, type GeneratedWebImage } from "./image-output.js";
 
@@ -15,6 +19,12 @@ const WORKER = fileURLToPath(new URL("./worker.py", import.meta.url));
 const ENDPOINT = "https://gemini.google.com/app";
 const MAX_PROMPT_BYTES = GEMINI_WEB_MAX_PROMPT_BYTES;
 const WORKER_TIMEOUT_MS = 480000;
+
+export function webEngineBackend(): "python" | "go" {
+  const value = process.env.TUXEVIL_ROTATOR_GEMINI_WEB_BACKEND || "python";
+  if (value !== "python" && value !== "go") throw new Error("Invalid Gemini Web backend; use python or go");
+  return value;
+}
 
 export class WebRequestError extends Error {}
 
@@ -193,8 +203,23 @@ export function runWebWorker(
   payload: Record<string, unknown>, signal?: AbortSignal, bridge?: ToolBridge,
 ): Promise<ForwardedResponse & { retryToolCall?: boolean }> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled"));
+  let goEngine: boolean;
+  try { goEngine = webEngineBackend() === "go"; }
+  catch (error) { return Promise.reject(error); }
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3", [WORKER], {
+    const startedAt = performance.now();
+    const diagnosticId = randomUUID();
+    let telemetry: Record<string, unknown> = {};
+    let readyMs: number | undefined;
+    const logCompletion = (outcome: "done" | "error" | "cancelled", status: number): void => {
+      logger.log(outcome === "error" ? "warn" : "info", "gemini-web", JSON.stringify({
+        diagnosticId, backend: goEngine ? "go" : "python", operation: payload.mode === "probe" ? "probe" : payload.output === "image" || payload.output === "image-or-text" ? "image" : "text",
+        outcome, status, workerMs: Math.round(performance.now() - startedAt), readyMs, ...telemetry,
+      }));
+    };
+    const command = goEngine ? process.env.TUXEVIL_ROTATOR_GEMINI_WEB_ENGINE || "/usr/local/bin/rotator-gemini-engine"
+      : process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PYTHON || "python3";
+    const child = spawn(command, goEngine ? [] : [WORKER], {
       stdio: ["pipe", "pipe", "ignore"],
     });
     const output = new PassThrough();
@@ -205,6 +230,8 @@ export function runWebWorker(
     let done = false;
     let settled = false;
     let buffered = "";
+    let streamedText = false;
+    let engineTools: Record<string, unknown>[] | undefined;
     const imageMode = payload.output === "image" || payload.output === "image-or-text";
     let image: GeneratedWebImage | undefined;
     const cleanup = (): void => {
@@ -220,9 +247,17 @@ export function runWebWorker(
         headers: { "Content-Type": "text/event-stream", "X-Rotator-Usage": "unavailable", "X-Rotator-Provider-Mode": "limited-web" },
       }) });
     };
+    const writeText = (text: string): void => {
+      const data = { candidates: [{ content: { role: "model", parts: [{ text }] } }] };
+      if (!output.write(`data: ${JSON.stringify(data)}\n\n`)) {
+        child.stdout.pause();
+        output.once("drain", () => child.stdout.resume());
+      }
+    };
     const fail = (status: number, message: string, retryToolCall = false, retryAfterSeconds = 60): void => {
       if (done) return;
       done = true;
+      logCompletion("error", status);
       cleanup();
       stop();
       if (settled) output.destroy(new Error(message));
@@ -231,18 +266,19 @@ export function runWebWorker(
     const abort = (): void => {
       if (done) return;
       done = true;
+      logCompletion("cancelled", 499);
       cleanup();
       stop();
       const error = new Error("Gemini Web request cancelled");
       output.destroy(error);
       if (!settled) { settled = true; reject(error); }
     };
-    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), WORKER_TIMEOUT_MS);
+    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), goEngine ? 125000 : WORKER_TIMEOUT_MS);
     timeout.unref();
     signal?.addEventListener("abort", abort, { once: true });
     // A cancelled Response body must terminate the upstream worker too.
     output.on("close", () => { if (!done) abort(); });
-    child.on("error", () => fail(503, "Gemini Web Python worker unavailable; install its dependencies"));
+    child.on("error", () => fail(503, goEngine ? "Gemini Web Go engine unavailable; build or install it" : "Gemini Web Python worker unavailable; install its dependencies"));
     child.stdin.on("error", () => fail(502, "Gemini Web worker stopped before receiving the request"));
     lines.on("line", (line) => {
       if (done) return;
@@ -250,7 +286,9 @@ export function runWebWorker(
         if (Buffer.byteLength(line) > MAX_IMAGE_EVENT_BYTES) throw new Error("output limit");
         const event: unknown = JSON.parse(line);
         if (!isRecord(event)) throw new Error("protocol");
-        if (event.type === "error") {
+        if (event.type === "diagnostic") {
+          telemetry = workerTelemetry(event);
+        } else if (event.type === "error") {
           const status = typeof event.status === "number" && [400, 401, 403, 404, 409, 429, 502, 503, 504].includes(event.status) ? event.status : 502;
           // Only our worker's fixed, non-secret messages cross this boundary.
           const retry = typeof event.retryAfterSeconds === "number" && Number.isInteger(event.retryAfterSeconds)
@@ -258,24 +296,45 @@ export function runWebWorker(
           fail(status, typeof event.message === "string" ? event.message : "Gemini Web request failed", false, retry);
         } else if (event.type === "ready" && !ready) {
           ready = true;
-          // Tool output is already buffered: validate it before committing HTTP 200.
+          readyMs = Math.round(performance.now() - startedAt);
+          // A matching ID allows text; tool calls require a complete response.
           if (!bridge && !imageMode && payload.mode !== "probe") startResponse();
         } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
           image = validateGeneratedWebImage(event);
+        } else if (event.type === "tools" && goEngine && ready && bridge && !imageMode && !engineTools) {
+          if (!Array.isArray(event.calls) || !event.calls.length || event.calls.length > 64 || !isRecord(payload.engineRequest)) throw new Error("invalid engine tools");
+          const declarations = toolDeclarations(payload.engineRequest);
+          const config = isRecord(payload.engineRequest.toolConfig) ? payload.engineRequest.toolConfig.functionCallingConfig : undefined;
+          engineTools = event.calls.map((call: unknown) => {
+            if (!isRecord(call) || typeof call.name !== "string" || !isRecord(call.args)) throw new Error("invalid engine tool");
+            const declaration = declarations.find((tool) => tool.name === call.name);
+            if (!declaration || !matchesToolSchema(call.args, declaration.parameters ?? { type: "object" }) ||
+                (isRecord(config) && Array.isArray(config.allowedFunctionNames) && !config.allowedFunctionNames.includes(call.name))) throw new Error("invalid engine tool");
+            return { functionCall: { name: call.name, args: call.args } };
+          });
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
-          if (imageMode || bridge) {
-            buffered += event.text;
-            if (buffered.length > 128000) throw new Error("output limit");
+          if (goEngine && !imageMode) {
+            if (!settled) startResponse();
+            streamedText = true;
+            writeText(event.text);
             return;
           }
-          const data = { candidates: [{ content: { role: "model", parts: [{ text: event.text }] } }] };
-          if (!output.write(`data: ${JSON.stringify(data)}\n\n`)) {
-            child.stdout.pause();
-            output.once("drain", () => child.stdout.resume());
+          if (imageMode || (bridge && !streamedText)) {
+            buffered += event.text;
+            if (buffered.length > 128000) throw new Error("output limit");
+            if (!imageMode && bridge?.canStreamText(buffered)) {
+              streamedText = true;
+              startResponse();
+              writeText(buffered);
+              buffered = "";
+            }
+            return;
           }
+          writeText(event.text);
         } else if (event.type === "done" && ready) {
           if (payload.mode === "probe") {
             done = settled = true;
+            logCompletion("done", 200);
             cleanup();
             output.destroy();
             resolve({ endpoint: ENDPOINT, response: Response.json({ usage: event.usage ?? {},
@@ -287,7 +346,10 @@ export function runWebWorker(
             startResponse();
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: image ? [{ inlineData: image }] : [{ text: buffered }] } }] })}\n\n`);
           }
-          if (bridge) {
+          if (goEngine && engineTools) {
+            if (!settled) startResponse();
+            output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: engineTools } }] })}\n\n`);
+          } else if (bridge && !streamedText) {
             if (event.truncated) { fail(502, "Gemini Web tool response exceeded the output limit"); return; }
             let part: Record<string, unknown>;
             try { part = bridge.parse(buffered); }
@@ -296,6 +358,7 @@ export function runWebWorker(
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [part] } }] })}\n\n`);
           }
           done = true;
+          logCompletion("done", 200);
           cleanup();
           output.end(`data: ${JSON.stringify({ candidates: [{ finishReason: event.truncated ? "MAX_TOKENS" : "STOP" }] })}\n\n`);
         } else throw new Error("protocol");
@@ -305,7 +368,7 @@ export function runWebWorker(
       if (!done) fail(502, "Gemini Web worker ended without completing the response");
       lines.close();
     });
-    child.stdin.end(JSON.stringify(payload));
+    child.stdin.end(JSON.stringify({ ...payload, diagnostics: true }));
   });
 }
 
@@ -324,15 +387,15 @@ export async function forwardRequest(
         bridge = createToolBridge(declarations, isRecord(config) ? {
           mode: String(config.mode), allowedFunctionNames: config.allowedFunctionNames as string[] | undefined,
         } : undefined);
-        prompt += `\n\n${bridge.instruction}`;
+        if (webEngineBackend() === "python") prompt += `\n\n${bridge.instruction}`;
         if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw new WebRequestError(`Gemini Web text context is limited to ${MAX_PROMPT_BYTES} UTF-8 bytes`);
       }
     }
   }
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
   const payload = {
-    mode: "generate", ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
-    proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
+    mode: "generate", streamText: true, ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
+    proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER), engineRequest: body.request,
   };
   const result = await runWebWorker(payload, signal, bridge);
   if (!result.retryToolCall || !bridge) return result;

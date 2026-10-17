@@ -20,6 +20,7 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { removeAccountFromConfig } from "../src/account-store.js";
 import { initDb } from "../src/db-store.js";
+import { logger } from "../src/logger.js";
 
 const readTool = { type: "function" as const, function: { name: "read", parameters: {
   type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 }, i: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["path", "i"],
@@ -249,6 +250,45 @@ describe("private worker protocol", () => {
     }
   }
 
+  it("accepts private diagnostics without forwarding them to the API stream", async () => {
+    await fakePython(`import json,sys
+request=json.load(sys.stdin)
+assert request['diagnostics'] is True
+for event in [{'type':'ready'},{'type':'delta','text':'ok'},{'type':'diagnostic','googleCode':1100,'timingsMs':{'init':2},'cookies':'private-cookie'},{'type':'done'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const { response } = await runWebWorker({ mode: "generate", prompt: "private-prompt" });
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      assert.match(text, /"text":"ok"/);
+      assert.doesNotMatch(text, /diagnostic|private-cookie|private-prompt|googleCode|timingsMs/);
+    });
+  });
+
+  it("retains the last safe inflight snapshot when the client aborts", async () => {
+    const logs: unknown[] = [];
+    const previous = logger.log;
+    logger.log = (_level, scope, message) => { if (scope === "gemini-web") logs.push(message); };
+    try {
+      await fakePython(`import json,sys,time
+json.load(sys.stdin)
+for event in [{'type':'diagnostic','activeStage':'googleRequest','googleRequests':1,'timingsMs':{'firstWireText':40,'googleRequest':100},'cookies':'private-cookie'}, {'type':'ready'}]:
+ print(json.dumps(event),flush=True)
+time.sleep(60)`, async () => {
+        const controller = new AbortController();
+        const { response } = await runWebWorker({ mode: "generate", prompt: "private-prompt" }, controller.signal);
+        controller.abort();
+        await assert.rejects(response.text());
+        assert.equal(logs.length, 1);
+        const report = JSON.parse(String(logs[0]));
+        assert.equal(report.outcome, "cancelled");
+        assert.equal(report.activeStage, "googleRequest");
+        assert.equal(report.googleRequests, 1);
+        assert.equal(report.timingsMs.firstWireText, 40);
+        assert.doesNotMatch(JSON.stringify(report), /private-cookie|private-prompt|cookies/);
+      });
+    } finally { logger.log = previous; }
+  });
+
   it("rejects malformed tool calls before committing HTTP 200", async () => {
     const bridge = createToolBridge([readTool.function]);
     const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
@@ -313,7 +353,7 @@ kind=${JSON.stringify(kind)}
 if kind == 'protocol':
  print('broken',flush=True)
 else:
- events=[{'type':'error','status':401,'message':'session expired'}] if kind == 'auth' else [{'type':'ready'},{'type':'delta','text':'partial'},{'type':'done','truncated':True}]
+ events=[{'type':'error','status':401,'message':'session expired'}] if kind == 'auth' else [{'type':'ready'},{'type':'delta','text':'ROTATOR_TOOL_'},{'type':'done','truncated':True}]
  for event in events: print(json.dumps(event),flush=True)`, async () => {
         const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: [readTool], messages: [{ role: "user", content: "Read package.json" }] });
         const result = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
@@ -342,6 +382,7 @@ time.sleep(30)`, async () => {
       await fakePython(`import json,sys
 request=json.load(sys.stdin)
 assert request['thinkingLevel']==${JSON.stringify(getWebThinkingLevel(id))}
+assert request['streamText'] is True
 for event in [{'type':'ready'},{'type':'delta','text':'OK'},{'type':'done'}]:
  print(json.dumps(event),flush=True)`, async () => {
         const body = openAIToAntigravityBody({ model: id, reasoning_effort: "high", messages: [{ role: "user", content: "test" }] });
@@ -445,6 +486,76 @@ for event in [{'type':'ready'}, {'type':'delta','text':'Привет 🌍'}, {'t
     });
   });
 
+  it("streams normal text with tools enabled before the worker completes", async () => {
+    const gate = join(temp, "stream-text-read");
+    await fakePython(`import json,sys,time,pathlib
+json.load(sys.stdin)
+for text in ['  ', 'При', 'вет 🌍']:
+ if text == '  ': print(json.dumps({'type':'ready'}),flush=True)
+ print(json.dumps({'type':'delta','text':text}),flush=True)
+ if text == 'При':
+  for _ in range(300):
+   if pathlib.Path(${JSON.stringify(gate)}).exists(): break
+   time.sleep(.01)
+  else: raise RuntimeError('consumer received no text before EOF')
+print(json.dumps({'type':'done'}),flush=True)`, async () => {
+      const bridge = createToolBridge([readTool.function]);
+      const { response } = await runWebWorker({ streamText: true }, undefined, bridge);
+      assert.equal(response.status, 200);
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      assert.match(new TextDecoder().decode(first.value), /При/);
+      await writeFile(gate, "read");
+      let raw = new TextDecoder().decode(first.value);
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        raw += new TextDecoder().decode(next.value);
+      }
+      const accumulator = geminiWebAdapter.createStreamAccumulator();
+      accumulator.append(raw);
+      assert.equal(accumulator.getText(), "  Привет 🌍");
+      assert.match(raw, /STOP/);
+    });
+  });
+
+  it("holds every split tool marker and required-tool response until validation", async () => {
+    for (const choice of [undefined, { mode: "ANY" }]) {
+      const bridge = createToolBridge([readTool.function], choice);
+      const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+      for (let offset = 0; offset <= marker.length; offset++) {
+        assert.equal(bridge.canStreamText(" \n" + marker.slice(0, offset)), false);
+      }
+      assert.equal(bridge.canStreamText(marker + '{"name":'), false);
+      assert.equal(bridge.canStreamText("Обычный ответ 🌍"), !choice);
+      assert.equal(bridge.canStreamText("ROTA"), false);
+      assert.equal(bridge.canStreamText("ROTATION"), !choice);
+      await fakePython(`import json,sys
+json.load(sys.stdin)
+print(json.dumps({'type':'ready'}),flush=True)
+for char in ${JSON.stringify(marker + '{"name":"read","arguments":{"path":"package.json","i":"Read"}}')}:
+ print(json.dumps({'type':'delta','text':char}),flush=True)
+print(json.dumps({'type':'error','status':429,'message':'different model; response discarded'}),flush=True)`, async () => {
+        const { response } = await runWebWorker({ streamText: true }, undefined, bridge);
+        assert.equal(response.status, 429);
+        const raw = await response.text();
+        assert.doesNotMatch(raw, /functionCall|ROTATOR_TOOL_/);
+      });
+    }
+  });
+
+  it("fails a started text stream with tools enabled on a late upstream error", async () => {
+    await fakePython(`import json,sys
+json.load(sys.stdin)
+for event in [{'type':'ready'},{'type':'delta','text':'Начало ответа'},{'type':'error','status':429,'message':'different model; response discarded'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const { response, retryToolCall } = await runWebWorker({ streamText: true }, undefined, createToolBridge([readTool.function]));
+      assert.equal(response.status, 200);
+      assert.notEqual(retryToolCall, true);
+      await assert.rejects(response.text(), /different model/);
+    });
+  });
+
   it("returns discovery and quota failures before committing HTTP 200", async () => {
     for (const status of [401, 404, 409, 429]) {
       await fakePython(`import json, sys
@@ -517,6 +628,7 @@ for event in [{'type':'ready'}, {'type':'error','status':502,'message':'upstream
     const rotator = {
       getConfig: () => ({}), hasActiveProvider: (id: string) => id === "gemini-web",
       getActiveAccount: async () => account, getRetryAfterMs: () => 0,
+      rotateToNext: async () => null,
       resolveQuotaModelKeyForDisplay: () => "gemini-web", getSafetyJitterMs: () => 0,
       getGlobalDelayMs: () => 0, recordUpstreamAttempt: () => {}, finishRequest: () => { finished++; },
       recordRequest: () => false, recordProxyEvent: () => {}, recordLatency: () => {},

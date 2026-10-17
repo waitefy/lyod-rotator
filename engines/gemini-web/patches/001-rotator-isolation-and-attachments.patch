@@ -1,0 +1,137 @@
+--- a/internal/gemini/models.go
++++ b/internal/gemini/models.go
+@@ -156,9 +156,7 @@
+ // answeredModelLabel matches the requested ModelInfo (preventing silent downgrades).
+ func IsMatchingServedModel(m ModelInfo, servedID, servedLabel string) bool {
+ 	if servedID != "" && m.ModelID != "" {
+-		if strings.EqualFold(servedID, m.ModelID) {
+-			return true
+-		}
++		return strings.EqualFold(servedID, m.ModelID)
+ 	}
+ 	if servedLabel != "" {
+ 		norm := func(s string) string {
+--- a/internal/server/accounts.go
++++ b/internal/server/accounts.go
+@@ -873,9 +873,8 @@
+ 	curPrompt := fullPrompt
+ 	if s.Cfg.SessionCache && !opts.Temporary && hasher != nil {
+ 		for split := len(messages) - 1; split >= 2; split-- {
+-			prefixKey := hasher.HashPrefix(account.ID, mid, split)
++			prefixKey := hasher.HashPrefix(account.ID, mid+"@think="+strconv.Itoa(opts.ThinkingLevel), split)
+ 			if cachedMeta := s.getSessionCache(prefixKey); len(cachedMeta) > 0 {
+-				opts.Metadata = cachedMeta
+ 				deltaPrompt, _, dErr := prompt.FlattenMessages(messages, toolsRaw, toolChoiceRaw, prompt.FlattenOptions{
+ 					StartIndex:      split,
+ 					MaxPromptChars:  s.Cfg.MaxPromptChars,
+@@ -883,6 +882,7 @@
+ 					AllowOverflow:   false,
+ 				})
+ 				if dErr == nil {
++					opts.Metadata = cachedMeta
+ 					curPrompt = deltaPrompt
+ 					attachmentParts = prompt.ExtractImageParts(messages[split:])
+ 				}
+--- a/internal/server/chat.go
++++ b/internal/server/chat.go
+@@ -543,7 +543,7 @@
+ 		}
+ 
+ 		if !opts.Temporary {
+-			s.saveSessionContinuation(account.ID, mid, messages, toolsRaw, toolChoiceRaw, content, oaCalls, lastCID, lastRID, candidateID, lastContextToken)
++			s.saveSessionContinuation(account.ID, fmt.Sprintf("%s@think=%d", mid, opts.ThinkingLevel), messages, toolsRaw, toolChoiceRaw, content, oaCalls, lastCID, lastRID, candidateID, lastContextToken)
+ 		}
+ 
+ 		if stream {
+--- a/internal/prompt/prompt.go
++++ b/internal/prompt/prompt.go
+@@ -24,6 +24,7 @@
+ )
+ 
+ var (
++	unresolvedCitationRe    = regexp.MustCompile(`\[cite:\s*\d+(?:\s*,\s*\d+)*\]`)
+ 	dataURLImageRe          = regexp.MustCompile(`^data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$`)
+ 	nonAlphaNumRe           = regexp.MustCompile(`[^a-z0-9]`)
+ 	fencedToolCallRe        = regexp.MustCompile("(?is)```(?:json)?\\s*\\{\\s*\"(?:tool_calls|toolCalls|function_call)\"[\\s\\S]*?```")
+@@ -135,6 +136,23 @@
+ 
+ 	pType, _ := part["type"].(string)
+ 	switch pType {
++	case "file":
++		file, _ := part["file"].(map[string]any)
++		raw, _ := file["file_data"].(string)
++		halves := strings.SplitN(raw, ";base64,", 2)
++		if len(halves) != 2 {
++			return nil
++		}
++		mime := strings.TrimPrefix(halves[0], "data:")
++		ext := map[string]string{"application/pdf": "pdf", "text/plain": "txt", "text/csv": "csv"}[mime]
++		if ext == "" {
++			return nil
++		}
++		data, err := base64.StdEncoding.DecodeString(halves[1])
++		if err != nil || len(data) == 0 || len(data) > 5*1024*1024 {
++			return nil
++		}
++		return &AttachmentPart{Data: data, ContentType: mime, Filename: fmt.Sprintf("document_%d.%s", index+1, ext)}
+ 	case "image_url", "input_image":
+ 		var rawURL, mime string
+ 		if s, ok := part["image_url"].(string); ok {
+@@ -862,7 +880,7 @@
+ func NewHistoryHasher(messages []map[string]any, tools any, toolChoice any) *HistoryHasher {
+ 	endOffsets := make([]int, len(messages)+1)
+ 	var joined bytes.Buffer
+-	for i, m := range messages {
++	for i, m := range canonicalHistory(messages) {
+ 		if i > 0 {
+ 			joined.WriteByte(',')
+ 		}
+@@ -989,6 +1007,9 @@
+ 		}
+ 	}
+ 
++	if role == "assistant" {
++		text = unresolvedCitationRe.ReplaceAllString(text, "")
++	}
+ 	entry := map[string]any{
+ 		"role": role,
+ 		"text": text,
+--- a/internal/cookies/jar.go
++++ b/internal/cookies/jar.go
+@@ -7,6 +7,7 @@
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"sort"
+ 	"strings"
+ 	"time"
+ )
+@@ -17,7 +18,7 @@
+ 	"SID", "HSID", "SSID", "APISID", "SAPISID",
+ 	"__Secure-1PSID", "__Secure-1PAPISID", "__Secure-3PSID", "__Secure-3PAPISID",
+ 	"__Secure-1PSIDTS", "__Secure-3PSIDTS",
+-	"SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC", "NID", "AEC",
++	"SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC", "NID", "AEC", "SOCS", "__Secure-ENID", "GOOGLE_ABUSE_EXEMPTION", "COMPASS",
+ }
+ 
+ var essentialSet = func() map[string]bool {
+@@ -65,6 +66,19 @@
+ 			parts = append(parts, name+"="+v)
+ 		}
+ 	}
++	// Preserve the imported login jar across load and rotation. EssentialNames
++	// controls which new Set-Cookie names may be absorbed, not which existing
++	// cookies are allowed to survive serialization.
++	var extra []string
++	for name, value := range m {
++		if !essentialSet[name] && name != "" && value != "" && !strings.ContainsAny(name, ";=\r\n") && !strings.ContainsAny(value, ";\r\n") {
++			extra = append(extra, name)
++		}
++	}
++	sort.Strings(extra)
++	for _, name := range extra {
++		parts = append(parts, name+"="+m[name])
++	}
+ 	return strings.Join(parts, "; ")
+ }
+ 

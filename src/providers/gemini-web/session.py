@@ -12,10 +12,12 @@ import sys
 import tempfile
 
 import worker
+from telemetry import CURRENT, Trace, phase
 
 # Leave time for cleanup before the stdio worker's 480-second watchdog fires.
 SESSION_REQUEST_TIMEOUT_SECONDS = 450
 CLIENT_CLOSE_TIMEOUT_SECONDS = 5
+DIAGNOSTIC_INTERVAL_SECONDS = 1
 
 
 def session_paths(payload):
@@ -78,11 +80,36 @@ class Session:
             save_cookies(self.client.cookies, base_psid=self.base_psid, verbose=False)
 
     async def execute(self, payload, send):
+        if payload.get("diagnostics") is not True:
+            return await self._execute(payload, send)
+        trace = Trace()
+        token = CURRENT.set(trace)
+        def emit(event):
+            if event["type"] == "done":
+                send(trace.event())
+            send(event)
+        async def report_progress():
+            while True:
+                await asyncio.sleep(DIAGNOSTIC_INTERVAL_SECONDS)
+                send(trace.event())
+        reporter = asyncio.create_task(report_progress())
+        try:
+            return await self._execute(payload, emit)
+        except BaseException as error:
+            send(trace.event(error))
+            raise
+        finally:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
+            CURRENT.reset(token)
+
+    async def _execute(self, payload, send):
         if payload.get("cookiesFile") != self.payload.get("cookiesFile") or payload.get("proxy") != self.payload.get("proxy"):
             raise worker.WorkerError(400, "Gemini Web session settings changed; reconnect the session")
         deadline = asyncio.get_running_loop().time() + SESSION_REQUEST_TIMEOUT_SECONDS
         try:
-            await asyncio.wait_for(self.lock.acquire(), worker.SESSION_LOCK_WAIT_SECONDS)
+            with phase("sessionWait"):
+                await asyncio.wait_for(self.lock.acquire(), worker.SESSION_LOCK_WAIT_SECONDS)
         except TimeoutError:
             raise worker.WorkerError(409, "Gemini Web session remained busy for 60 seconds; retry the request") from None
         generation = None
@@ -110,7 +137,8 @@ class Session:
             if not finished:
                 raise TimeoutError()
             await generation
-            self.persist()
+            with phase("persist"):
+                self.persist()
             for event in completed:
                 send(event)
         except BaseException:

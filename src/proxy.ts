@@ -562,12 +562,19 @@ async function handleUpstreamAccountAction(
 
   // A browser session failure must never flag the parent account or its OAuth credentials.
   if (action.kind === "web-error") {
+    const canRecover = [401, 403, 409, 503, 504].includes(action.httpStatus);
     if (action.httpStatus === 401) {
       rotator.markProviderInvalid(account, "gemini-web", "Gemini Web session requires reconnection");
     } else if (action.httpStatus === 403) {
       rotator.setProviderCooldown(account, "gemini-web", 60_000);
+    } else if (canRecover) {
+      rotator.setProviderCooldown(account, "gemini-web", 15_000);
     }
     logRequestEnd(action.httpStatus, `endpoint=${action.endpoint}`);
+    if (canRecover && options.canRetry) {
+      const nextAccount = await rotateAndRelease();
+      if (nextAccount) return { kind: "retry" };
+    }
     return buildFailureDecision(options, action.httpStatus, action.errorText);
   }
 

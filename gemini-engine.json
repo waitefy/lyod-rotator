@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "engine": {
+    "repository": "https://github.com/Sonesh-2202/Gemini-Sentinel",
+    "commit": "96623e6aa8c27945a65400bad7a69436a7662f10",
+    "license": "MIT",
+    "path": "third_party/gemini-sentinel",
+    "sha256": "97f61e48061ba1dedc031ebd935c64659b367d2ef0343e4ea5f515cb82eaefe2"
+  },
+  "referenceProjects": [
+    {
+      "repository": "https://github.com/zexadev/gemini-web2api-go",
+      "commit": "a65b1d1a5ac614c1b455857334b4f1c73ab8fcfb",
+      "role": "comparison; streaming and transport reference"
+    },
+    {
+      "repository": "https://github.com/ikhsan3adi/gemini-web2api",
+      "commit": "a07325d638a0f7e6c917f8e797cab25a8a31d436",
+      "role": "comparison; protocol and tool reference"
+    }
+  ]
+}
