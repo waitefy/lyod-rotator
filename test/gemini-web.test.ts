@@ -531,6 +531,7 @@ for event in [{'type':'ready'}, {'type':'error','status':502,'message':'upstream
     const rotator = {
       getConfig: () => ({}), hasActiveProvider: (id: string) => id === "gemini-web",
       getActiveAccount: async () => account, getRetryAfterMs: () => 0,
+      rotateToNext: async () => null,
       resolveQuotaModelKeyForDisplay: () => "gemini-web", getSafetyJitterMs: () => 0,
       getGlobalDelayMs: () => 0, recordUpstreamAttempt: () => {}, finishRequest: () => { finished++; },
       recordRequest: () => false, recordProxyEvent: () => {}, recordLatency: () => {},
