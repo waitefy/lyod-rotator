@@ -163,8 +163,66 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaises(worker.WorkerError) as caught:
                 self.run_client(client)
             self.assertEqual(caught.exception.status, 404)
+
             self.assertFalse(client.generated)
             self.assertTrue(client.closed)
+
+    def test_streams_identified_text_before_eof_and_never_retries_after_output(self):
+        async def check(ending, streaming=True, output="text"):
+            events = []
+
+            class LiveClient(Client):
+                @contextlib.asynccontextmanager
+                async def http_stream(client, *args, **kwargs):
+                    def frame(identifier):
+                        inner = [None] * 40
+                        inner[39] = identifier
+                        value = json.dumps([["wrb.fr", None, json.dumps(inner)]])
+                        return (str(len(value) + 2) + "\n" + value + "\n").encode()
+
+                    async def content():
+                        yield b")]}'\n"
+                        yield frame(None if ending == "late-id" else client.served_model_id)
+                        early = streaming and output == "text" and ending != "late-id"
+                        self.assertEqual(events, [{"type": "ready"}, {"type": "delta", "text": "Первый 🌍"}] if early else [])
+                        if ending == "mismatch":
+                            yield frame("different-model")
+                        elif ending == "interrupted":
+                            raise OSError("private network error")
+                        elif ending in (1013, 1037):
+                            yield self.wire_error(ending).removeprefix(b")]}'\n")
+                        else:
+                            yield frame(client.served_model_id)
+                    yield SimpleNamespace(status_code=200, aiter_content=content)
+
+                async def generate_content_stream(client, prompt, *, model, temporary):
+                    client.generation_calls += 1
+                    async with client.client.stream("POST", worker.GENERATE_ENDPOINT) as response:
+                        index = 0
+                        async for chunk in response.aiter_content():
+                            if chunk == b")]}'\n":
+                                continue
+                            yield SimpleNamespace(text_delta="Первый 🌍" if index == 0 else " затем второй")
+                            index += 1
+
+            client = LiveClient([model("argon")], [])
+            payload = {**self.payload, "streamText": streaming, "output": output}
+            if ending in ("complete", "late-id"):
+                await worker.run(payload, lambda *a, **k: client, emit_event=events.append)
+                self.assertEqual([e["type"] for e in events], ["ready", "delta", "delta", "done"])
+                self.assertEqual(events[2]["text"], " затем второй")
+            else:
+                with self.assertRaises(OSError if ending == "interrupted" else worker.WorkerError):
+                    await worker.run(payload, lambda *a, **k: client, emit_event=events.append)
+                self.assertNotIn("done", [e["type"] for e in events])
+            self.assertEqual(client.generation_calls, 1)
+            self.assertTrue(client.closed)
+
+        for ending in ("complete", "late-id", "mismatch", "interrupted", 1013, 1037):
+            with self.subTest(ending=ending):
+                asyncio.run(check(ending))
+        asyncio.run(check("complete", streaming=False))
+        asyncio.run(check("complete", output="image-or-text"))
 
     def test_exhausted_five_hour_or_weekly_budget_never_generates(self):
         for window in ("current_5h", "weekly"):

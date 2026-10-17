@@ -218,6 +218,7 @@ export function runWebWorker(
     let done = false;
     let settled = false;
     let buffered = "";
+    let streamedText = false;
     const imageMode = payload.output === "image" || payload.output === "image-or-text";
     let image: GeneratedWebImage | undefined;
     const cleanup = (): void => {
@@ -232,6 +233,13 @@ export function runWebWorker(
       resolve({ endpoint: ENDPOINT, response: new Response(Readable.toWeb(output) as ReadableStream<Uint8Array>, {
         headers: { "Content-Type": "text/event-stream", "X-Rotator-Usage": "unavailable", "X-Rotator-Provider-Mode": "limited-web" },
       }) });
+    };
+    const writeText = (text: string): void => {
+      const data = { candidates: [{ content: { role: "model", parts: [{ text }] } }] };
+      if (!output.write(`data: ${JSON.stringify(data)}\n\n`)) {
+        child.stdout.pause();
+        output.once("drain", () => child.stdout.resume());
+      }
     };
     const fail = (status: number, message: string, retryToolCall = false, retryAfterSeconds = 60): void => {
       if (done) return;
@@ -276,21 +284,23 @@ export function runWebWorker(
         } else if (event.type === "ready" && !ready) {
           ready = true;
           readyMs = Math.round(performance.now() - startedAt);
-          // Tool output is already buffered: validate it before committing HTTP 200.
+          // A matching ID allows text; tool calls require a complete response.
           if (!bridge && !imageMode && payload.mode !== "probe") startResponse();
         } else if (event.type === "image" && ready && imageMode && !image && !bridge) {
           image = validateGeneratedWebImage(event);
         } else if (event.type === "delta" && ready && typeof event.text === "string") {
-          if (imageMode || bridge) {
+          if (imageMode || (bridge && !streamedText)) {
             buffered += event.text;
             if (buffered.length > 128000) throw new Error("output limit");
+            if (!imageMode && bridge?.canStreamText(buffered)) {
+              streamedText = true;
+              startResponse();
+              writeText(buffered);
+              buffered = "";
+            }
             return;
           }
-          const data = { candidates: [{ content: { role: "model", parts: [{ text: event.text }] } }] };
-          if (!output.write(`data: ${JSON.stringify(data)}\n\n`)) {
-            child.stdout.pause();
-            output.once("drain", () => child.stdout.resume());
-          }
+          writeText(event.text);
         } else if (event.type === "done" && ready) {
           if (payload.mode === "probe") {
             done = settled = true;
@@ -306,7 +316,7 @@ export function runWebWorker(
             startResponse();
             output.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: image ? [{ inlineData: image }] : [{ text: buffered }] } }] })}\n\n`);
           }
-          if (bridge) {
+          if (bridge && !streamedText) {
             if (event.truncated) { fail(502, "Gemini Web tool response exceeded the output limit"); return; }
             let part: Record<string, unknown>;
             try { part = bridge.parse(buffered); }
@@ -351,7 +361,7 @@ export async function forwardRequest(
   }
   catch (error) { return failure(400, error instanceof WebRequestError ? error.message : "Invalid Gemini Web request"); }
   const payload = {
-    mode: "generate", ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
+    mode: "generate", streamText: true, ...(body.requestType === "image-generation" ? { output: "image" } : body.requestType === "image-or-text" ? { output: "image-or-text" } : {}), prompt, ...(attachments.length ? { attachments } : {}), thinkingLevel: getWebThinkingLevel(body.model), cookiesFile: getCookiesFile(account.config),
     proxy: getProviderProxyUrl(account.config, GEMINI_WEB_PROVIDER),
   };
   const result = await runWebWorker(payload, signal, bridge);

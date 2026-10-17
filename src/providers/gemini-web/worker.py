@@ -192,16 +192,25 @@ def response_model_ids(raw):
 
 
 class ModelGuard:
-    """Inspect a bounded wire response before consume_stream releases output.
+    """Inspect a bounded wire response and reject mismatching model metadata.
 
     Google may put the served model in the final frame. Checking just the first
-    delta would allow an HTTP-200 downgrade to escape, including tool calls.
+    delta cannot establish that the whole response is valid. Text streaming can
+    opt in after a matching ID; tool calls still require the final check in TS.
     The library must still receive live chunks so its watchdog sees progress.
     """
     def __init__(self, expected):
         if not isinstance(expected, str) or not expected:
             raise WorkerError(502, "Gemini Web Argon model identifier is unavailable")
         self.expected, self.verified, self.error = expected, False, None
+        self.identified = False
+
+    def can_stream(self):
+        if self.error:
+            raise self.error
+        if self.client.client is not self.original or self.original.stream is not self.stream:
+            raise WorkerError(502, "Gemini Web generation transport changed; response discarded")
+        return self.identified
 
     def check(self):
         if self.error:
@@ -234,6 +243,8 @@ class ModelGuard:
         elif errors:
             # A later permanent error overrides a preceding temporary failure.
             self.error = GoogleStreamError(next((code for code in errors if code != 1013), errors[0]))
+        elif ids and not self.error:
+            self.identified = True
 
     @contextlib.contextmanager
     def transport(self, client):
@@ -284,7 +295,8 @@ class ModelGuard:
                     guard.inspect(raw)
                 if guard.error and not isinstance(guard.error, ModelVerificationError):
                     raise guard.error
-                # consume_stream buffers parsed output until this check finishes.
+                # A successful completion (and tool execution in TS) still
+                # requires this final check, even when text was streamed early.
                 # Let the library identify explicit failures for missing metadata.
 
         @contextlib.asynccontextmanager
@@ -294,6 +306,7 @@ class ModelGuard:
                 if guard.error:
                     raise guard.error
                 guard.verified = False
+                guard.identified = False
             trace = CURRENT.get() if generate else None
             started = monotonic() if trace is not None else 0
             if trace is not None:
@@ -566,7 +579,25 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
     citations = CitationText()
     emitted_chars = 0
     pending = []
-    publish = pending.append if guard is not None else emit_event
+    ready = False
+    stream_text = payload.get("streamText") is True and not image_mode
+
+    def flush():
+        nonlocal ready
+        if not ready:
+            emit_event({"type": "ready"})
+            ready = True
+        for event in pending:
+            emit_event(event)
+        pending.clear()
+
+    def publish(event):
+        if guard is None:
+            emit_event(event)
+        else:
+            pending.append(event)
+            if stream_text and guard.can_stream():
+                flush()
     async with contextlib.aclosing(
         client.generate_content_stream(payload["prompt"], model=model, temporary=True, **kwargs)
     ) as stream:
@@ -576,7 +607,7 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
                 guard.check()
             raise WorkerError(502, "Gemini Web returned no response")
         if guard is None:
-            emit_event({"type": "ready"})
+            flush()
         count = 0
         truncated = False
 
@@ -616,9 +647,7 @@ async def consume_stream(client, payload, model, emit_event, kwargs, guard=None)
                 break
     if guard is not None:
         guard.check()
-        emit_event({"type": "ready"})
-        for event in pending:
-            emit_event(event)
+        flush()
     tail = citations.finish()
     remaining = MAX_OUTPUT_CHARS - emitted_chars
     if tail:

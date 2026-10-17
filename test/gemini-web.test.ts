@@ -327,7 +327,7 @@ kind=${JSON.stringify(kind)}
 if kind == 'protocol':
  print('broken',flush=True)
 else:
- events=[{'type':'error','status':401,'message':'session expired'}] if kind == 'auth' else [{'type':'ready'},{'type':'delta','text':'partial'},{'type':'done','truncated':True}]
+ events=[{'type':'error','status':401,'message':'session expired'}] if kind == 'auth' else [{'type':'ready'},{'type':'delta','text':'ROTATOR_TOOL_'},{'type':'done','truncated':True}]
  for event in events: print(json.dumps(event),flush=True)`, async () => {
         const body = openAIToAntigravityBody({ model: GEMINI_WEB_MODEL, tools: [readTool], messages: [{ role: "user", content: "Read package.json" }] });
         const result = await geminiWebAdapter.forwardRequest({ config: { email: "fixture@local", credentials: [] } } as unknown as AccountRuntime, body, {});
@@ -356,6 +356,7 @@ time.sleep(30)`, async () => {
       await fakePython(`import json,sys
 request=json.load(sys.stdin)
 assert request['thinkingLevel']==${JSON.stringify(getWebThinkingLevel(id))}
+assert request['streamText'] is True
 for event in [{'type':'ready'},{'type':'delta','text':'OK'},{'type':'done'}]:
  print(json.dumps(event),flush=True)`, async () => {
         const body = openAIToAntigravityBody({ model: id, reasoning_effort: "high", messages: [{ role: "user", content: "test" }] });
@@ -456,6 +457,76 @@ for event in [{'type':'ready'}, {'type':'delta','text':'Привет 🌍'}, {'t
       assert.equal(accumulator.final(), null);
       assert.equal(accumulator.getText(), "Привет 🌍");
       assert.match(raw, /STOP/);
+    });
+  });
+
+  it("streams normal text with tools enabled before the worker completes", async () => {
+    const gate = join(temp, "stream-text-read");
+    await fakePython(`import json,sys,time,pathlib
+json.load(sys.stdin)
+for text in ['  ', 'При', 'вет 🌍']:
+ if text == '  ': print(json.dumps({'type':'ready'}),flush=True)
+ print(json.dumps({'type':'delta','text':text}),flush=True)
+ if text == 'При':
+  for _ in range(300):
+   if pathlib.Path(${JSON.stringify(gate)}).exists(): break
+   time.sleep(.01)
+  else: raise RuntimeError('consumer received no text before EOF')
+print(json.dumps({'type':'done'}),flush=True)`, async () => {
+      const bridge = createToolBridge([readTool.function]);
+      const { response } = await runWebWorker({ streamText: true }, undefined, bridge);
+      assert.equal(response.status, 200);
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      assert.match(new TextDecoder().decode(first.value), /При/);
+      await writeFile(gate, "read");
+      let raw = new TextDecoder().decode(first.value);
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        raw += new TextDecoder().decode(next.value);
+      }
+      const accumulator = geminiWebAdapter.createStreamAccumulator();
+      accumulator.append(raw);
+      assert.equal(accumulator.getText(), "  Привет 🌍");
+      assert.match(raw, /STOP/);
+    });
+  });
+
+  it("holds every split tool marker and required-tool response until validation", async () => {
+    for (const choice of [undefined, { mode: "ANY" }]) {
+      const bridge = createToolBridge([readTool.function], choice);
+      const marker = bridge.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/)![0];
+      for (let offset = 0; offset <= marker.length; offset++) {
+        assert.equal(bridge.canStreamText(" \n" + marker.slice(0, offset)), false);
+      }
+      assert.equal(bridge.canStreamText(marker + '{"name":'), false);
+      assert.equal(bridge.canStreamText("Обычный ответ 🌍"), !choice);
+      assert.equal(bridge.canStreamText("ROTA"), false);
+      assert.equal(bridge.canStreamText("ROTATION"), !choice);
+      await fakePython(`import json,sys
+json.load(sys.stdin)
+print(json.dumps({'type':'ready'}),flush=True)
+for char in ${JSON.stringify(marker + '{"name":"read","arguments":{"path":"package.json","i":"Read"}}')}:
+ print(json.dumps({'type':'delta','text':char}),flush=True)
+print(json.dumps({'type':'error','status':429,'message':'different model; response discarded'}),flush=True)`, async () => {
+        const { response } = await runWebWorker({ streamText: true }, undefined, bridge);
+        assert.equal(response.status, 429);
+        const raw = await response.text();
+        assert.doesNotMatch(raw, /functionCall|ROTATOR_TOOL_/);
+      });
+    }
+  });
+
+  it("fails a started text stream with tools enabled on a late upstream error", async () => {
+    await fakePython(`import json,sys
+json.load(sys.stdin)
+for event in [{'type':'ready'},{'type':'delta','text':'Начало ответа'},{'type':'error','status':429,'message':'different model; response discarded'}]:
+ print(json.dumps(event),flush=True)`, async () => {
+      const { response, retryToolCall } = await runWebWorker({ streamText: true }, undefined, createToolBridge([readTool.function]));
+      assert.equal(response.status, 200);
+      assert.notEqual(retryToolCall, true);
+      await assert.rejects(response.text(), /different model/);
     });
   });
 
