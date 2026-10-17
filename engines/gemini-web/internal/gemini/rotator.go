@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -22,16 +23,43 @@ func (ac *AccountClient) RotatorDownloadImage(ctx context.Context, rawURL string
 	if err != nil {
 		return nil, "", err
 	}
-	res, err := sess.Client.Do(ctx, transport.RequestOptions{Method: "GET", URL: u.String(), Headers: map[string]string{"cookie": ac.CookieHeader()}, Timeout: 45 * time.Second})
-	if err != nil {
-		return nil, "", err
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	for redirects := 0; redirects <= 3; redirects++ {
+		// Google's authenticated image handoff requires cookies on both exact
+		// allowlisted origins. Validate every redirect before sending credentials.
+		var image bytes.Buffer
+		res, err := sess.Client.Do(ctx, transport.RequestOptions{Method: "GET", URL: u.String(), Headers: map[string]string{"cookie": ac.CookieHeader(), "referer": Origin + "/"}, Timeout: 45 * time.Second, OnChunk: func(chunk string) error {
+			if image.Len()+len(chunk) > 8*1024*1024 {
+				return errors.New("generated image too large")
+			}
+			_, err := image.WriteString(chunk)
+			return err
+		}})
+		if err != nil {
+			return nil, "", err
+		}
+		if res.Status == 301 || res.Status == 302 || res.Status == 303 || res.Status == 307 || res.Status == 308 {
+			location := res.Headers["location"]
+			next, err := url.Parse(location)
+			if err != nil || location == "" {
+				return nil, "", errors.New("invalid image redirect")
+			}
+			next = u.ResolveReference(next)
+			if next.Scheme != "https" || next.User != nil || (next.Host != "lh3.googleusercontent.com" && next.Host != "work.fife.usercontent.google.com") {
+				return nil, "", errors.New("invalid image redirect origin")
+			}
+			u = next
+			continue
+		}
+		data := image.Bytes()
+		mime := strings.Split(http.DetectContentType(data), ";")[0]
+		if res.Status != 200 || len(data) > 8*1024*1024 || (mime != "image/png" && mime != "image/jpeg" && mime != "image/webp") {
+			return nil, "", errors.New("invalid generated image")
+		}
+		return data, mime, nil
 	}
-	data := []byte(res.Body)
-	mime := strings.Split(http.DetectContentType(data), ";")[0]
-	if res.Status != 200 || len(data) > 8*1024*1024 || (mime != "image/png" && mime != "image/jpeg" && mime != "image/webp") {
-		return nil, "", errors.New("invalid generated image")
-	}
-	return data, mime, nil
+	return nil, "", errors.New("too many image redirects")
 }
 func (ac *AccountClient) RotatorIdentity(ctx context.Context) (map[string]any, error) {
 	sess, err := ac.acquireSession(ctx)

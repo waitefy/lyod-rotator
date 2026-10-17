@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -89,7 +90,7 @@ test("honors cancellation and rejects other providers before making requests", a
     ctx.model.provider = "other-provider";
     await assert.rejects(generateImage({ prompt: "island" }, ctx), /Select a Gemini/);
     ctx.model.provider = "tuxevil-rotator";
-    const abort = new AbortController();
+    const abort = new globalThis.AbortController();
     abort.abort();
     await assert.rejects(generateImage({ prompt: "island" }, ctx, abort.signal), { name: "AbortError" });
     assert.equal(calls.length, 0);

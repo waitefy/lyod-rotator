@@ -18,13 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements-gemini-web.txt fork-base.json ./
-COPY --from=engine-build /out/rotator-gemini-engine /usr/local/bin/rotator-gemini-engine
-COPY gemini-engine.json ./
-COPY third_party/gemini-sentinel/LICENSE /usr/share/doc/rotator-gemini-engine/LICENSE
 RUN python3 -m venv /opt/gemini-web \
     && /opt/gemini-web/bin/pip install --no-cache-dir -r requirements-gemini-web.txt
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=engine-build /out/rotator-gemini-engine /usr/local/bin/rotator-gemini-engine
+COPY gemini-engine.json ./
+COPY third_party/gemini-sentinel/LICENSE /usr/share/doc/rotator-gemini-engine/LICENSE
 COPY --chown=node:node bin ./bin
 COPY --chown=node:node src ./src
 COPY --chown=node:node README.md CHANGELOG.md LICENSE ./
