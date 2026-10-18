@@ -240,6 +240,59 @@ function renderPage(title: string, body: string): string {
 </html>`;
 }
 
+export function serveGeminiWebLogin(res: ServerResponse, account = ""): void {
+  if (account.length > 254 || [...account].some(char => char.charCodeAt(0) < 32) ||
+      (account && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(account))) {
+    res.writeHead(400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(renderPage("Gemini App", "<h1>Invalid account</h1><p>Open this page from the account card.</p>"));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  res.end(renderPage("Connect Gemini App", `<h1>${account ? "Reconnect" : "Connect"} Gemini App</h1>
+<p>${account ? `Sign in as <strong>${escapeHtml(account)}</strong>. A different account will not replace this session.` : "Sign in to the Google account you want to add. Existing accounts are updated automatically."}</p>
+<ol><li>Click <strong>Open Firefox</strong> and allow the local Rotator Login helper to open.</li>
+<li>Sign in to Google in the separate window and check that Argon is available.</li>
+<li>Close that Firefox window. The helper verifies and saves the session automatically.</li></ol>
+<a class="cta" id="gemini-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<p id="gemini-status" role="status" aria-live="polite">Checking the saved connection…</p>
+<div class="note">The local login helper must be installed on this computer. Google sign-in happens on your PC. No passwords or cookies need to be pasted here.</div>
+<p>If Firefox does not open, the helper may be missing or the browser may be waiting for permission to open it.</p>
+<p><a href="/dashboard/accounts">Back to accounts</a></p>
+<script>
+(() => {
+  const button = document.getElementById('gemini-connect');
+  const status = document.getElementById('gemini-status');
+  const account = button.dataset.account;
+  const link = new URL('tuxevil-gemini://login');
+  link.searchParams.set('origin', location.origin);
+  if (account) link.searchParams.set('account', account);
+  button.href = link.href;
+  let polls = 0;
+  let stopped = false;
+  addEventListener('pagehide', () => { stopped = true; });
+  async function poll() {
+    try {
+      const response = await fetch('/api/status', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      const web = data.accounts.filter(a => (a.provider || '').split('+').includes('gemini-web'));
+      const target = web.find(a => a.email.toLowerCase() === account.toLowerCase());
+      const ready = web.filter(a => !a.invalidProviders?.['gemini-web']).length;
+      status.textContent = account
+        ? !target ? 'This account has no saved Gemini App connection yet.'
+          : target.invalidProviders?.['gemini-web'] ? 'Sign-in required. Complete the login in Firefox and close its window.'
+          : 'Gemini App session is connected. Usage limits may still apply.'
+        : ready + ' Gemini App connection(s) saved; ' + (web.length - ready) + ' need sign-in. This page refreshes automatically.';
+    } catch {
+      status.textContent = 'Could not refresh connection status. Return to the dashboard to check it.';
+    }
+    if (!stopped && ++polls < 120) setTimeout(poll, 5000);
+  }
+  void poll();
+})();
+</script>`));
+}
+
 export function serveLoginLanding(res: ServerResponse): void {
   const hostedReady = isHostedOAuthConfigured();
   const oauth = hostedReady ? getOAuthClientConfig() : null;

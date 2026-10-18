@@ -89,6 +89,25 @@ describe("dashboard routes", () => {
     else process.env.PI_ROTATOR_TELEMETRY = previousTelemetry;
   });
 
+  it("requires admin login for Gemini App and serves account-specific local-helper links", async () => {
+    await start(makeRotator().rotator);
+    const denied = await fetch(`${base}/login-gemini`, { redirect: "manual" });
+    assert.equal(denied.status, 401);
+    const cookie = await signIn();
+    const response = await fetch(`${base}/login-gemini?account=user%40example.com`, { headers: { cookie } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const html = await response.text();
+    assert.match(html, /data-account="user@example.com"/);
+    assert.match(html, /tuxevil-gemini:\/\/login/);
+    assert.match(html, /link.searchParams.set\('origin', location.origin\)/);
+    assert.match(html, /A different account will not replace this session/);
+    assert.doesNotMatch(html, /secret/);
+    const invalid = await fetch(`${base}/login-gemini?account=${encodeURIComponent('<script>alert(1)</script>')}`, { headers: { cookie } });
+    assert.equal(invalid.status, 400);
+    assert.doesNotMatch(await invalid.text(), /<script>alert/);
+  });
+
   it("serves the app shell for every dashboard path without auth", async () => {
     await start(makeRotator().rotator);
     for (const path of ["/dashboard", "/dashboard/accounts/user%40example.com", "/dashboard/keys"]) {

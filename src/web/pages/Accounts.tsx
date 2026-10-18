@@ -47,7 +47,7 @@ import {
   Segmented,
   StatusPill,
 } from "../components/ui.js";
-import { openAddAccount } from "./shared.js";
+import { openAddAccount, openGeminiLogin } from "./shared.js";
 
 const COLUMNS: Array<{ key: AccountSortKey; label: string; class?: string; defaultDir: 1 | -1 }> = [
   { key: "name", label: "Account", defaultDir: 1 },
@@ -112,9 +112,12 @@ export function AccountsPage(): JSX.Element {
         title="Accounts"
         description={summary(all)}
         actions={
-          <Button icon="plus" variant="primary" onClick={openAddAccount}>
-            Add account
-          </Button>
+          <>
+            <Button icon="login" onClick={() => openGeminiLogin()}>Connect Gemini App</Button>
+            <Button icon="plus" variant="primary" onClick={openAddAccount}>
+              Add account
+            </Button>
+          </>
         }
       />
       <div class="toolbar">
@@ -292,6 +295,10 @@ function summary(all: DashboardAccount[]): string {
 export function accountMenuItems(account: DashboardAccount, options: { includeOpen?: boolean } = {}): MenuItem[] {
   const items: MenuItem[] = [];
   if (options.includeOpen) items.push({ label: "Open details", icon: "chevronRight", onSelect: () => navigate(accountPath(account.email)) });
+  items.push({
+    label: providerIds(account).includes("gemini-web") ? "Reconnect Gemini App" : "Connect Gemini App",
+    icon: "login", onSelect: () => openGeminiLogin(account.email),
+  });
   if (account.status === "disabled") items.push({ label: "Re-enable", icon: "play", onSelect: () => void actions.enable(account.email) });
   if (account.status === "flagged") items.push({ label: "Restore to rotation", icon: "play", onSelect: () => void actions.restore(account.email) });
   if (account.status !== "disabled") items.push({ label: "Disable", icon: "pause", onSelect: () => void actions.disable(account.email) });

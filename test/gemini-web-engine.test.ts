@@ -14,12 +14,32 @@ async function fakeEngine(source: string, run: () => Promise<void>): Promise<voi
   const keys = ["TUXEVIL_ROTATOR_GEMINI_WEB_BACKEND", "TUXEVIL_ROTATOR_GEMINI_WEB_ENGINE"] as const;
   const previous = keys.map(key => process.env[key]);
   const path = join(temp, "engine");
-  await writeFile(path, `#!/usr/bin/env python3\nimport json,sys,time\njson.load(sys.stdin)\n${source}\n`, { mode: 0o700 });
+  await writeFile(path, `#!/usr/bin/env python3\nimport json,sys,time\nreceived=json.load(sys.stdin)\n${source}\n`, { mode: 0o700 });
   process.env[keys[0]] = "go";
   process.env[keys[1]] = path;
   try { await run(); } finally { keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }); }
 }
 describe("Go engine worker boundary", () => {
+  it("uses the same default egress for login probes and generation while preserving account overrides", async () => {
+    const previous = process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY;
+    process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY = "http://127.0.0.1:12080";
+    try {
+      for (const mode of ["probe", "generate"]) {
+        for (const proxy of [undefined, "http://127.0.0.1:12081", ""]) {
+          const expected = proxy ?? process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY;
+          await fakeEngine(`assert received.get('proxy') == ${JSON.stringify(expected)}
+print(json.dumps({'type':'ready'}),flush=True)
+print(json.dumps({'type':'done'}),flush=True)`, async () => {
+            const { response } = await runWebWorker({ mode, proxy });
+            assert.equal(response.status, 200, await response.text());
+          });
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY;
+      else process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY = previous;
+    }
+  });
   it("streams verified text before completion even when tools are declared", async () => {
     await fakeEngine(`print(json.dumps({'type':'ready'}),flush=True)
 print(json.dumps({'type':'delta','text':'first'}),flush=True)

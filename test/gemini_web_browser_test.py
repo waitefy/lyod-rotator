@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src/providers/gemini-web"))
@@ -50,6 +52,56 @@ class BrowserTest(unittest.TestCase):
         with patch.object(browser_login.subprocess, "run", run), contextlib.redirect_stdout(io.StringIO()) as output:
             browser_login.install_remote(args)
         self.assertNotIn("private-test-value", output.getvalue())
+
+    def test_preserves_additional_google_session_cookies(self):
+        with sqlite3.connect(self.root / "cookies.sqlite") as connection:
+            connection.execute("CREATE TABLE moz_cookies (name TEXT, value TEXT, host TEXT, path TEXT, isSecure INTEGER, originAttributes TEXT, expiry INTEGER)")
+            rows = [(name, "fixture-" + name, ".google.com", "/", secure, "", time.time() + 3600)
+                    for name, secure in (("__Secure-1PSID", 1), ("SAPISID", 1), ("SID", 0), ("HSID", 0),
+                                         ("APISID", 0), ("SIDCC", 0), ("SOCS", 0), ("GOOGLE_ABUSE_EXEMPTION", 0))]
+            connection.executemany("INSERT INTO moz_cookies VALUES (?,?,?,?,?,?,?)", rows)
+        self.assertEqual(set(browser_login.read_cookies(self.root)), {row[0] for row in rows})
+
+    def test_server_rejection_preserves_http_status_without_exposing_response_or_blame(self):
+        path = self.root / "cookies.json"
+        path.write_text(json.dumps({"__Secure-1PSID": "private-session"}))
+        args = argparse.Namespace(cookies_file=str(path), remote_cookie_file="/sessions/c.json", server_cookie_file="/sessions/c.json",
+                                  remote_state_dir="/state", email="web@local", server="root@example.test")
+        for status in (401, 403, 404, 429, 502, None):
+            result = subprocess.CompletedProcess([], 1, json.dumps({"error": "server-login-rejected", "status": status}).encode(), b"private-upstream-response")
+            with self.subTest(status=status), patch.object(browser_login.subprocess, "run", return_value=result):
+                with self.assertRaises(browser_login.LoginError) as caught:
+                    browser_login.install_remote(args)
+                message = str(caught.exception)
+                self.assertNotIn("private", message)
+                if status:
+                    self.assertIn(str(status), message)
+                if status in (401, 403):
+                    self.assertIn("IP сервера", message)
+                    self.assertNotIn("Проверьте доступность Argon", message)
+
+    def test_identity_request_uses_complete_cookie_jar_and_reports_google_challenge(self):
+        cookies = {"__Secure-1PSID": "private-session", "SOCS": "private-consent"}
+        def open_request(opener, request, *args, **kwargs):
+            self.assertIn("SOCS=private-consent", request.get_header("Cookie"))
+            raise urllib.error.HTTPError(request.full_url, 302, "private-error", {"Location": "https://www.google.com/sorry/index?secret=private-token"}, None)
+        with patch.object(browser_login.urllib.request.OpenerDirector, "open", open_request):
+            with self.assertRaisesRegex(ValueError, "Google.*провер") as caught:
+                browser_login.identify_account(cookies)
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_failed_identity_keeps_private_session_for_retry(self):
+        args = argparse.Namespace(cookies_file=str(self.root / "unused.json"), upload_only=False, profile=None, firefox="firefox", email=None)
+        def login(profile, destination, firefox):
+            browser_login.save_private(destination, {"__Secure-1PSID": "private-session"})
+        with patch.object(browser_login, "browser_login", login), \
+             patch.object(browser_login, "identify_account", side_effect=ValueError("fixture failure")):
+            with self.assertRaises(ValueError):
+                browser_login.automatic_login(args, self.root)
+        saved = list(self.root.glob("pending-*/cookies.json"))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(json.loads(saved[0].read_text()), {"__Secure-1PSID": "private-session"})
+        self.assertEqual(saved[0].stat().st_mode & 0o777, 0o600)
 
     def test_identity_requires_the_authenticated_bootstrap_and_is_stable_across_cookies(self):
         identity = {"oPEP7c": "User@example.test", "S06Grb": "1234567890", "SNlM0e": "fixture-token"}

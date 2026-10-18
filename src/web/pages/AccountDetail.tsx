@@ -36,6 +36,7 @@ import {
 } from "../components/ui.js";
 import { accountMenuItems } from "./Accounts.js";
 import { providerPath } from "../state/router.js";
+import { openGeminiLogin } from "./shared.js";
 
 export function AccountDetail({ email, onClose }: { email: string; onClose: () => void }): JSX.Element {
   const data = overview.value!;
@@ -231,6 +232,7 @@ function ProviderProblems({ account }: { account: DashboardAccount }): JSX.Eleme
         {invalid.map(([provider, reason]) => (
           <div key={`i-${provider}`}>
             <strong>{providerLabel(provider)}</strong> credential rejected: {masker.value.text(reason)}
+            {provider === "gemini-web" && <Button size="sm" icon="login" onClick={() => openGeminiLogin(account.email)}>Reconnect Gemini App</Button>}
           </div>
         ))}
         {turnedOff.map((provider) => (

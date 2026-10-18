@@ -87,6 +87,7 @@ import { isDbConfigured } from "./db-store.js";
 import {
   handleHostedCallback,
   serveLoginLanding,
+  serveGeminiWebLogin,
   startHostedLogin,
   serveCliLogin,
   handleCliLoginApi,
@@ -2425,6 +2426,12 @@ export function startProxy(
       if (!requireAdmin(req, res)) return;
       trackFeature("hostedLogin");
       serveLoginLanding(res);
+      return;
+    }
+
+    if (method === "GET" && pathname === "/login-gemini") {
+      if (!requireAdmin(req, res)) return;
+      serveGeminiWebLogin(res, new URL(url, "http://localhost").searchParams.get("account") ?? "");
       return;
     }
 

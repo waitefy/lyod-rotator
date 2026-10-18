@@ -368,7 +368,11 @@ export function runWebWorker(
       if (!done) fail(502, "Gemini Web worker ended without completing the response");
       lines.close();
     });
-    child.stdin.end(JSON.stringify({ ...payload, diagnostics: true }));
+    child.stdin.end(JSON.stringify({
+      ...payload,
+      proxy: payload.proxy ?? process.env.TUXEVIL_ROTATOR_GEMINI_WEB_PROXY,
+      diagnostics: true,
+    }));
   });
 }
 

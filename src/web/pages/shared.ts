@@ -6,6 +6,11 @@ export function openAddAccount(): void {
   window.open(path, "_blank", "noopener");
 }
 
+export function openGeminiLogin(email?: string): void {
+  const path = "/login-gemini" + (email ? `?account=${encodeURIComponent(email)}` : "");
+  window.open(path, "_blank", "noopener");
+}
+
 export function downloadUrl(href: string): void {
   const link = document.createElement("a");
   link.href = href;
