@@ -374,6 +374,7 @@ async function readUntilMarker(
 async function postAndAbortAfterFirstChunk(
   url: string,
   payload: unknown,
+  abortWhen?: Promise<void>,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const body = JSON.stringify(payload);
@@ -398,6 +399,10 @@ async function postAndAbortAfterFirstChunk(
       if (err.code === "ECONNRESET") return;
       reject(err);
     });
+    void abortWhen?.then(() => {
+      req.destroy();
+      resolve();
+    });
     req.setTimeout(1000, () => {
       req.destroy();
       reject(new Error("timed out waiting for first response chunk"));
@@ -409,14 +414,19 @@ async function postAndAbortAfterFirstChunk(
 async function assertCompatAbortReleasesInFlight(
   path: string,
   payload: unknown,
+  beforeModelEvent = false,
 ): Promise<void> {
   let upstreamResponse: ServerResponse | undefined;
+  let accepted!: () => void;
+  const upstreamAccepted = new Promise<void>((resolve) => { accepted = resolve; });
   const upstream = await listenServer((req, res) => {
     req.resume();
     req.on("end", () => {
       upstreamResponse = res;
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.flushHeaders();
+      if (!beforeModelEvent) res.write('data: {"candidates":[{"content":{"parts":[{"text":"started"}]}}]}\n\n');
+      accepted();
     });
   });
   endpointOverrides.splice(0, endpointOverrides.length, upstream.url);
@@ -430,6 +440,7 @@ async function assertCompatAbortReleasesInFlight(
     await postAndAbortAfterFirstChunk(
       `http://127.0.0.1:${port}${path}`,
       payload,
+      beforeModelEvent ? upstreamAccepted : undefined,
     );
 
     await waitFor(() => tracking.finishRequests === 1);
@@ -967,6 +978,14 @@ describe("compat observability", () => {
       messages: [{ role: "user", content: "hold the stream open" }],
       stream: true,
     });
+  });
+
+  it("cancels a silent upstream when the client disconnects before the first model event", async () => {
+    await assertCompatAbortReleasesInFlight("/v1/chat/completions", {
+      model: "gemini-3.8-flash-high",
+      messages: [{ role: "user", content: "hold before generation" }],
+      stream: true,
+    }, true);
   });
 
   it("releases an in-flight Responses request when the client disconnects before upstream completes", async () => {

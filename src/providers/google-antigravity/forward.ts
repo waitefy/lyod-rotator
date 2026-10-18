@@ -15,6 +15,7 @@ import { logger } from "../../logger.js";
 import type { TokenUsage } from "../adapter.js";
 import { DEFAULT_PROVIDER, getProviderProjectId } from "../credential-helpers.js";
 import { getAccountProxyDispatcher } from "../proxy-dispatcher.js";
+import { awaitAntigravityStreamStart } from "./stream-start.js";
 import {
   fetchWithHeadersTimeout,
   type RequestInitWithDispatcher,
@@ -438,7 +439,7 @@ export async function forwardRequest(
         continue;
       }
 
-      return { response, endpoint };
+      return { response: await awaitAntigravityStreamStart(response, signal), endpoint };
     } catch (err) {
       if (signal?.aborted) throw err;
       if (endpointIdx < ANTIGRAVITY_ENDPOINTS.length - 1) {

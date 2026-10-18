@@ -20,6 +20,7 @@ import {
 } from "../src/rotator.js";
 import { fetchProviderQuota } from "../src/providers/google-antigravity/quota.js";
 import { dynamicCatalog } from "../src/providers/google-antigravity/dynamic-catalog.js";
+import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "../src/providers/google-antigravity/stream-start.js";
 
 const endpointOverrides = ANTIGRAVITY_ENDPOINTS as unknown as string[];
 const originalEndpoints = [...endpointOverrides];
@@ -1482,6 +1483,81 @@ describe("proxy e2e: native Gemini thinkingLevel passthrough", () => {
 });
 
 describe("proxy e2e: endpoint cascade", () => {
+	it("bounds silent-stream retries and releases every admitted account", async (t) => {
+		const realSetTimeout = globalThis.setTimeout;
+		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
+			if (args[1] === ANTIGRAVITY_STREAM_START_TIMEOUT_MS) args[1] = 10;
+			return realSetTimeout(...args);
+		});
+		let calls = 0;
+		let cancellations = 0;
+		t.mock.method(globalThis, "fetch", async () => {
+			calls++;
+			return new Response(new ReadableStream<Uint8Array>({
+				cancel() { cancellations++; },
+			}), { headers: { "Content-Type": "text/event-stream" } });
+		});
+		const tracking: RotatorTracking = {};
+		const rotator = makeRotator(makeAccount("first@example.invalid"), tracking, {
+			accounts: [makeAccount("second@example.invalid"), makeAccount("unused@example.invalid")],
+			streamRecoveryMaxRetries: 1,
+		});
+		const outcome = await withRotation(rotator, "gemini-3.8-flash-high", {}, {
+			...makeBody(), model: "gemini-3.8-flash-high",
+		}, async () => { assert.fail("silent response must not reach the writer"); });
+		assert.equal(outcome.ok, false);
+		if (!outcome.ok) assert.equal(outcome.status, 502);
+		assert.equal(calls, 2);
+		assert.equal(cancellations, 2);
+		assert.equal(tracking.finishRequest, 2);
+		assert.equal(tracking.markError, 0);
+	});
+	it("recovers a silent HTTP 200 on another account without changing model or effort", async (t) => {
+		const realSetTimeout = globalThis.setTimeout;
+		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
+			if (args[1] === ANTIGRAVITY_STREAM_START_TIMEOUT_MS) args[1] = 50;
+			return realSetTimeout(...args);
+		});
+		const bodies: string[] = [];
+		const authorizations: string[] = [];
+		let cancelled = false;
+		const upstream = await listen((req, res) => {
+			let body = "";
+			req.on("data", (chunk) => { body += chunk.toString(); });
+			req.on("end", () => {
+				bodies.push(body);
+				authorizations.push(req.headers.authorization || "");
+				res.writeHead(200, { "Content-Type": "text/event-stream" });
+				if (bodies.length === 1) {
+					res.write('data: {"response":{"usageMetadata":{"promptTokenCount":29}}}\n\n');
+					res.once("close", () => { cancelled = true; });
+				} else res.end('data: {"candidates":[{"content":{"parts":[{"text":"recovered"}]}}]}\n\n');
+			});
+		});
+		endpointOverrides.splice(0, endpointOverrides.length, upstream.url);
+		const tracking: RotatorTracking = {};
+		const rotator = makeRotator(makeAccount("first@example.invalid"), tracking, {
+			accounts: [makeAccount("second@example.invalid")], streamRecoveryMaxRetries: 1,
+		});
+		let callbacks = 0;
+		try {
+			const outcome = await withRotation(rotator, "gemini-3.8-flash-high", {}, {
+				...makeBody(), model: "gemini-3.8-flash-high",
+			}, async (response) => {
+				callbacks++;
+				return response.text();
+			});
+			assert.equal(outcome.ok, true);
+			if (outcome.ok) assert.match(outcome.result, /recovered/);
+			assert.equal(callbacks, 1, "the stalled stream must never reach the compat writer");
+			assert.equal(bodies.length, 2);
+			assert.deepEqual(JSON.parse(bodies[0]), JSON.parse(bodies[1]));
+			assert.notEqual(authorizations[0], authorizations[1]);
+			assert.equal(cancelled, true);
+			assert.equal(tracking.finishRequest, 2);
+			assert.equal(tracking.markError, 0);
+		} finally { await upstream.close(); }
+	});
 	it("falls back from daily to prod endpoint when daily returns 404", async () => {
 		const dailyHits: Capture[] = [];
 		const prodHits: Capture[] = [];
