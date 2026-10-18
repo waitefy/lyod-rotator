@@ -27,7 +27,8 @@ import (
 
 var sourceCommit = "development"
 
-const deadline = 120 * time.Second
+// Tool arguments are released only after complete validation; allow large writes.
+const deadline = 240 * time.Second
 
 func emit(value any) { _ = json.NewEncoder(os.Stdout).Encode(value) }
 func failure(status int, message string) {

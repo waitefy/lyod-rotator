@@ -273,7 +273,7 @@ export function runWebWorker(
       output.destroy(error);
       if (!settled) { settled = true; reject(error); }
     };
-    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), goEngine ? 125000 : WORKER_TIMEOUT_MS);
+    const timeout = setTimeout(() => fail(504, "Gemini Web request timed out"), goEngine ? 245000 : WORKER_TIMEOUT_MS);
     timeout.unref();
     signal?.addEventListener("abort", abort, { once: true });
     // A cancelled Response body must terminate the upstream worker too.
