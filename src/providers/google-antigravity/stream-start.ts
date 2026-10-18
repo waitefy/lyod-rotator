@@ -1,4 +1,4 @@
-// Keep a silent HTTP 200 recoverable by the rotator until generation starts.
+// Keep HTTP 200 recoverable until an answer, tool call or terminal event arrives.
 export const ANTIGRAVITY_STREAM_START_TIMEOUT_MS = 60_000;
 const MAX_PREFLIGHT_BYTES = 256 * 1024;
 
@@ -8,22 +8,29 @@ export class AntigravityStreamStartError extends Error {
   override name = "AntigravityStreamStartError";
 }
 
-function hasModelEvent(data: string): boolean {
-  if (data.trim() === "[DONE]") return true;
+function classifyModelEvent(data: string): "ready" | "thinking" | "none" {
+  if (data.trim() === "[DONE]") return "ready";
   try {
     const parsed = JSON.parse(data);
     const response = parsed?.response ?? parsed;
-    return Boolean(response?.error || response?.promptFeedback?.blockReason ||
-      response?.candidates?.some((candidate: {
-        finishReason?: string; content?: { parts?: Record<string, unknown>[] };
-      }) => candidate.finishReason || candidate.content?.parts?.some((part) =>
-        (typeof part.text === "string" && part.text.length > 0) ||
-        part.functionCall || part.functionResponse || part.inlineData ||
-        part.fileData || part.executableCode || part.codeExecutionResult)));
+    if (response?.error || response?.promptFeedback?.blockReason) return "ready";
+    let thinking = false;
+    for (const candidate of response?.candidates ?? []) {
+      if (candidate.finishReason) return "ready";
+      for (const part of candidate.content?.parts ?? []) {
+        if (part.functionCall || part.functionResponse || part.inlineData ||
+            part.fileData || part.executableCode || part.codeExecutionResult) return "ready";
+        if (typeof part.text === "string" && part.text.length > 0) {
+          if (part.thought === true) thinking = true;
+          else return "ready";
+        }
+      }
+    }
+    return thinking ? "thinking" : "none";
   } catch {
     // Let the normal parser handle malformed nonempty data; startup recovery
     // must not hide protocol errors by treating them as silence.
-    return Boolean(data.trim());
+    return data.trim() ? "ready" : "none";
   }
 }
 
@@ -43,10 +50,15 @@ export async function awaitAntigravityStreamStart(
   let tail = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
+  let resetDeadline = (): void => {};
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new AntigravityStreamStartError(
-      `Antigravity produced no model event within ${timeoutMs}ms`,
-    )), timeoutMs);
+    resetDeadline = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => reject(new AntigravityStreamStartError(
+        `Antigravity produced no model event or thinking progress within ${timeoutMs}ms`,
+      )), timeoutMs);
+    };
+    resetDeadline();
     onAbort = () => reject(signal?.reason ?? new DOMException("Request aborted", "AbortError"));
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
@@ -59,7 +71,7 @@ export async function awaitAntigravityStreamStart(
       if (chunk.done) {
         // Tolerate a final data line without the optional trailing blank line,
         // just as the downstream compatibility parser does.
-        if (tail.split(/\r?\n/).some((line) => line.startsWith("data:") && hasModelEvent(line.slice(5)))) break;
+        if (tail.split(/\r?\n/).some((line) => line.startsWith("data:") && classifyModelEvent(line.slice(5)) === "ready")) break;
         throw new AntigravityStreamStartError("Antigravity stream ended before a model event");
       }
       buffered.push(chunk.value);
@@ -72,7 +84,11 @@ export async function awaitAntigravityStreamStart(
         tail = tail.slice(boundary.index + boundary[0].length);
         const data = event.split(/\r?\n/).filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trimStart()).join("\n");
-        if (hasModelEvent(data)) ready = true;
+        const kind = classifyModelEvent(data);
+        if (kind === "ready") ready = true;
+        // A live thinking stream may take longer than the startup timeout.
+        // Buffer thoughts for safe retry; metadata/heartbeats are not progress.
+        else if (kind === "thinking") resetDeadline();
       }
       if (!ready && bytes > MAX_PREFLIGHT_BYTES) {
         throw new AntigravityStreamStartError("Antigravity startup events exceeded the buffer limit");

@@ -51,6 +51,59 @@ it("times out usage-only streams and cancels the old reader", async () => {
   assert.equal(cancelled, true);
 });
 
+it("keeps a lone thinking fragment recoverable until a tool or visible answer arrives", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"response":{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true}]}}],"usageMetadata":{}}}\n\n'));
+    },
+    cancel() { cancelled = true; },
+  }), { headers: { "Content-Type": "text/event-stream" } });
+  await assert.rejects(awaitAntigravityStreamStart(response, undefined, 10), AntigravityStreamStartError);
+  assert.equal(cancelled, true);
+});
+
+it("allows continued thinking beyond the initial deadline and preserves it before a tool call", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const encoder = new TextEncoder();
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  let committed = false;
+  const thinking = 'data: {"candidates":[{"content":{"parts":[{"text":"thought","thought":true}]}}]}\n\n';
+  const tool = 'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{}}}]}}]}\n\n';
+  const pending = awaitAntigravityStreamStart(new Response(new ReadableStream<Uint8Array>({
+    start(controller) { source = controller; controller.enqueue(encoder.encode(thinking)); },
+  }), { headers: { "Content-Type": "text/event-stream" } }), undefined, 10)
+    .then((response) => { committed = true; return response; });
+  await setImmediate();
+  t.mock.timers.tick(9);
+  source.enqueue(encoder.encode(thinking));
+  await setImmediate();
+  t.mock.timers.tick(9);
+  await setImmediate();
+  assert.equal(committed, false);
+  source.enqueue(encoder.encode(tool));
+  source.close();
+  assert.equal(await (await pending).text(), thinking + thinking + tool);
+});
+
+it("does not let usage heartbeats prolong stalled thinking", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const pending = awaitAntigravityStreamStart(new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller;
+      controller.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"thought","thought":true}]}}]}\n\n'));
+    },
+  }), { headers: { "Content-Type": "text/event-stream" } }), undefined, 10);
+  const rejected = assert.rejects(pending, AntigravityStreamStartError);
+  await setImmediate();
+  t.mock.timers.tick(9);
+  source.enqueue(new TextEncoder().encode(': heartbeat\n\ndata: {"usageMetadata":{}}\n\n'));
+  await setImmediate();
+  t.mock.timers.tick(2);
+  await rejected;
+});
+
 it("does not mistake empty model placeholders for actual generation", async () => {
   const response = new Response(new ReadableStream<Uint8Array>({
     start(controller) {

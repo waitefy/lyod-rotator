@@ -1512,7 +1512,7 @@ describe("proxy e2e: endpoint cascade", () => {
 		assert.equal(tracking.finishRequest, 2);
 		assert.equal(tracking.markError, 0);
 	});
-	it("recovers a silent HTTP 200 on another account without changing model or effort", async (t) => {
+	it("recovers a stalled thinking stream on another account without changing model or effort", async (t) => {
 		const realSetTimeout = globalThis.setTimeout;
 		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
 			if (args[1] === ANTIGRAVITY_STREAM_START_TIMEOUT_MS) args[1] = 50;
@@ -1529,7 +1529,7 @@ describe("proxy e2e: endpoint cascade", () => {
 				authorizations.push(req.headers.authorization || "");
 				res.writeHead(200, { "Content-Type": "text/event-stream" });
 				if (bodies.length === 1) {
-					res.write('data: {"response":{"usageMetadata":{"promptTokenCount":29}}}\n\n');
+					res.write('data: {"response":{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true}]}}],"usageMetadata":{"promptTokenCount":29}}}\n\n');
 					res.once("close", () => { cancelled = true; });
 				} else res.end('data: {"candidates":[{"content":{"parts":[{"text":"recovered"}]}}]}\n\n');
 			});
