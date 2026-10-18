@@ -108,6 +108,22 @@ describe("dashboard routes", () => {
     assert.doesNotMatch(await invalid.text(), /<script>alert/);
   });
 
+  it("offers Gemini App on the shared login page with account-specific reconnection", async () => {
+    await start({ ...makeRotator().rotator, getConfig: () => ({}) });
+    const cookie = await signIn();
+    const response = await fetch(`${base}/login-cli?provider=gemini-web&account=user%40example.com`, { headers: { cookie } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const html = await response.text();
+    assert.match(html, /data-panel="panel-gemini-web">Gemini App/);
+    assert.match(html, /data-account="user@example.com"/);
+    assert.match(html, /tuxevil-gemini:\/\/login/);
+    assert.match(html, /if \(selectedTab\) selectedTab.click\(\)/);
+    const invalid = await fetch(`${base}/login-cli?account=${encodeURIComponent('<script>alert(1)</script>')}`, { headers: { cookie } });
+    assert.equal(invalid.status, 400);
+    assert.doesNotMatch(await invalid.text(), /<script>alert/);
+  });
+
   it("serves the app shell for every dashboard path without auth", async () => {
     await start(makeRotator().rotator);
     for (const path of ["/dashboard", "/dashboard/accounts/user%40example.com", "/dashboard/keys"]) {

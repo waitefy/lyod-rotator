@@ -113,7 +113,6 @@ export function AccountsPage(): JSX.Element {
         description={summary(all)}
         actions={
           <>
-            <Button icon="login" onClick={() => openGeminiLogin()}>Connect Gemini App</Button>
             <Button icon="plus" variant="primary" onClick={openAddAccount}>
               Add account
             </Button>

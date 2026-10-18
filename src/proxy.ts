@@ -2438,7 +2438,7 @@ export function startProxy(
     if (method === "GET" && pathname === "/login-cli") {
       if (!requireAdmin(req, res)) return;
       trackFeature("cliLogin");
-      serveCliLogin(res, rotator);
+      serveCliLogin(res, rotator, new URL(url, "http://localhost").searchParams.get("account") ?? "");
       return;
     }
 

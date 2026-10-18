@@ -1,13 +1,11 @@
-import { overview } from "../state/store.js";
-
 /** Account sign-in lives on the server-rendered login pages; open it in a new tab. */
 export function openAddAccount(): void {
-  const path = overview.value?.hostedOAuthConfigured ? "/login" : "/login-cli";
+  const path = "/login-cli";
   window.open(path, "_blank", "noopener");
 }
 
 export function openGeminiLogin(email?: string): void {
-  const path = "/login-gemini" + (email ? `?account=${encodeURIComponent(email)}` : "");
+  const path = "/login-cli?provider=gemini-web" + (email ? `&account=${encodeURIComponent(email)}` : "");
   window.open(path, "_blank", "noopener");
 }
 

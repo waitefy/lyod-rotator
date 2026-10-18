@@ -248,7 +248,11 @@ export function serveGeminiWebLogin(res: ServerResponse, account = ""): void {
     return;
   }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
-  res.end(renderPage("Connect Gemini App", `<h1>${account ? "Reconnect" : "Connect"} Gemini App</h1>
+  res.end(renderPage("Connect Gemini App", geminiWebLoginPanel(account)));
+}
+
+function geminiWebLoginPanel(account = ""): string {
+  return `<h1>${account ? "Reconnect" : "Connect"} Gemini App</h1>
 <p>${account ? `Sign in as <strong>${escapeHtml(account)}</strong>. A different account will not replace this session.` : "Sign in to the Google account you want to add. Existing accounts are updated automatically."}</p>
 <ol><li>Click <strong>Open Firefox</strong> and allow the local Rotator Login helper to open.</li>
 <li>Sign in to Google in the separate window and check that Argon is available.</li>
@@ -290,7 +294,7 @@ export function serveGeminiWebLogin(res: ServerResponse, account = ""): void {
   }
   void poll();
 })();
-</script>`));
+</script>`;
 }
 
 export function serveLoginLanding(res: ServerResponse): void {
@@ -370,7 +374,14 @@ function pruneCliSessions(): void {
 export function serveCliLogin(
   res: ServerResponse,
   configSource?: Pick<TypeSafeConfigSink, "getConfig">,
+  account = "",
 ): void {
+  if (account.length > 254 || (account && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(account)) ||
+      [...account].some(char => char.charCodeAt(0) < 32)) {
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+    res.end("Invalid account");
+    return;
+  }
   pruneCliSessions();
   const currentTypeSafe = configSource?.getConfig().typesafeRouting;
   const typeSafeConfigured = Boolean(currentTypeSafe?.apiKey);
@@ -416,7 +427,7 @@ export function serveCliLogin(
     // OAuth environment overrides.
   }
 
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
   res.end(
     renderPage(
       "Add Account",
@@ -425,6 +436,7 @@ export function serveCliLogin(
 
 <div class="tabs">
   <button class="tab active" data-panel="panel-google">Google (Antigravity)</button>
+  <button class="tab" data-panel="panel-gemini-web">Gemini App</button>
   <button class="tab" data-panel="panel-codex">OpenAI Codex</button>
   <button class="tab" data-panel="panel-ollama">Ollama Cloud</button>
   <button class="tab" data-panel="panel-zen">OpenCode Zen</button>
@@ -451,6 +463,10 @@ ${authUrl && sessionId ? `<h3 style="margin:24px 0 8px;font-size:18px;">Step 1 &
     Connect Account
   </button>
 </form>` : `<div class="note error">Google OAuth is not configured for this server. Set ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET and ANTIGRAVITY_REDIRECT_URI to enable it.</div>`}
+</div>
+
+<div class="panel" id="panel-gemini-web">
+${geminiWebLoginPanel(account)}
 </div>
 
 <div class="panel" id="panel-codex">
@@ -534,6 +550,10 @@ document.querySelectorAll('.tab').forEach((tab) => {
     document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.id === tab.dataset.panel));
   });
 });
+
+const selectedProvider = new URLSearchParams(location.search).get('provider');
+const selectedTab = Array.from(document.querySelectorAll('.tab')).find(tab => tab.dataset.panel === 'panel-' + selectedProvider);
+if (selectedTab) selectedTab.click();
 
 function showResult(html) {
   document.getElementById('result').innerHTML = html;
