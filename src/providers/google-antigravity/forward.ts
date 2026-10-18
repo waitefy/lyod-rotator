@@ -16,6 +16,7 @@ import type { TokenUsage } from "../adapter.js";
 import { DEFAULT_PROVIDER, getProviderProjectId } from "../credential-helpers.js";
 import { getAccountProxyDispatcher } from "../proxy-dispatcher.js";
 import { awaitAntigravityStreamStart } from "./stream-start.js";
+import { observeAntigravityStream } from "./stream-diagnostics.js";
 import {
   fetchWithHeadersTimeout,
   type RequestInitWithDispatcher,
@@ -439,7 +440,7 @@ export async function forwardRequest(
         continue;
       }
 
-      return { response: await awaitAntigravityStreamStart(response, signal), endpoint };
+      return { response: await awaitAntigravityStreamStart(observeAntigravityStream(response), signal), endpoint };
     } catch (err) {
       if (signal?.aborted) throw err;
       if (endpointIdx < ANTIGRAVITY_ENDPOINTS.length - 1) {
