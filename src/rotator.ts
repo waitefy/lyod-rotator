@@ -3715,13 +3715,13 @@ export class AccountRotator {
       await this.ensureValidTokenForProvider(account, adapter.id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith("Token refresh failed") || msg.startsWith("Token refresh error:")) {
-        this.markError(account, msg);
-        throw err;
-      }
-      const wrapped = `Token refresh error: ${msg}`;
-      this.markError(account, wrapped);
-      throw new Error(wrapped, { cause: err });
+      // Provider-scoped invalidation: token refresh failures only affect the
+      // provider whose token could not be refreshed, not the whole account.
+      const reason = msg.startsWith("Token refresh failed") || msg.startsWith("Token refresh error:")
+        ? msg
+        : `Token refresh error: ${msg}`;
+      this.markProviderInvalid(account, adapter.id, reason);
+      throw msg === reason ? err : new Error(reason, { cause: err });
     }
   }
 
@@ -5163,8 +5163,11 @@ export class AccountRotator {
       if (target.providerId === "openai-codex") {
         this.markProviderInvalid(account, target.providerId, failure.description);
       } else if (failure.accountEnforcement) {
+        // Provider-scoped invalidation: even with account-enforcement language
+        // in the response, only the specific provider credential is invalidated.
+        // Sibling providers on the same account remain routable.
         this.reportQuotaPollFlag(account, response.status, errorText, upstreamModel);
-        this.markFlagged(account, failure.description, { triggerProtectivePause: false });
+        this.markProviderInvalid(account, target.providerId, failure.description);
       } else {
         account.lastError = failure.description;
         this.kickstartDeniedUntil.set(denialKey, Date.now() + 30 * 60 * 1000);

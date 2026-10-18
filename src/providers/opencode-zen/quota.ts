@@ -30,13 +30,15 @@ export async function fetchOpenCodeZenQuota(
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         const errorText = await response.text().catch(() => "");
-        ctx.log(`${account.config.email}: OpenCode Zen API returned ${response.status}, flagging account`);
+        ctx.log(`${account.config.email}: OpenCode Zen API returned ${response.status}, invalidating provider credential`);
         ctx.reportQuotaPollFlag(account, response.status, errorText);
-        ctx.markFlagged(
-          account,
-          `OpenCode Zen API ${response.status}: ${errorText}`,
-          { triggerProtectivePause: false },
-        );
+        if (ctx.markProviderInvalid) {
+          ctx.markProviderInvalid(
+            account,
+            OPENCODE_ZEN_PROVIDER_ID,
+            `OpenCode Zen API ${response.status}: ${errorText}`,
+          );
+        }
       }
       return;
     }

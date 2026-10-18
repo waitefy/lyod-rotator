@@ -50,14 +50,16 @@ export async function fetchProviderUsage(
       if (response.status === 401 || response.status === 403) {
         const errorText = await response.text().catch(() => "");
         ctx.log(
-          `${account.config.email}: Ollama quota API returned ${response.status}, flagging account`,
+          `${account.config.email}: Ollama quota API returned ${response.status}, invalidating provider credential`,
         );
         ctx.reportQuotaPollFlag(account, response.status, errorText);
-        ctx.markFlagged(
-          account,
-          `Ollama quota API ${response.status}: ${errorText}`,
-          { triggerProtectivePause: false },
-        );
+        if (ctx.markProviderInvalid) {
+          ctx.markProviderInvalid(
+            account,
+            "ollama",
+            `Ollama quota API ${response.status}: ${errorText}`,
+          );
+        }
       }
       return;
     }

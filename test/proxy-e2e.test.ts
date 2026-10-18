@@ -1215,7 +1215,7 @@ describe("proxy e2e: 401 unauthorized", () => {
 		});
 		endpointOverrides.splice(0, endpointOverrides.length, upstream.url);
 
-		const tracking = { markFlagged: 0, finishRequest: 0 };
+		const tracking = { markProviderInvalid: 0, finishRequest: 0 };
 		const flaggedAccount = makeAccount("bad@example.com");
 		// Make the rotator return null after the 401 to simulate "no replacement"
 		const rotator = {
@@ -1236,7 +1236,8 @@ describe("proxy e2e: 401 unauthorized", () => {
 				poolHealthyCount: 1,
 				uptimeSeconds: 0,
 			}),
-			markFlagged: () => { tracking.markFlagged++; },
+			markFlagged: () => {},
+			markProviderInvalid: () => { tracking.markProviderInvalid++; },
 			markError: () => {},
 			recordRequest: () => false,
 			recordProxyEvent: () => {},
@@ -1253,14 +1254,14 @@ describe("proxy e2e: 401 unauthorized", () => {
 			);
 
 			// After a 401, withRotation should:
-			//  1. mark the account flagged
+			//  1. invalidate the provider credential (not flag the whole account)
 			//  2. try to rotate
 			//  3. find no replacement and return 503/429 "no accounts available"
 			assert.equal(outcome.ok, false);
 			if (!outcome.ok) {
 				assert.ok([429, 503].includes(outcome.status), `expected 429 or 503, got ${outcome.status}`);
 			}
-			assert.equal(tracking.markFlagged, 1, "account should be flagged exactly once");
+			assert.equal(tracking.markProviderInvalid, 1, "provider should be invalidated exactly once");
 			assert.equal(tracking.finishRequest, 1, "401 should release the flagged account once");
 			assert.equal(flags.length, 1, "upstream should be hit exactly once before rotation");
 		} finally {
@@ -1270,7 +1271,7 @@ describe("proxy e2e: 401 unauthorized", () => {
 });
 
 describe("proxy e2e: 403 flagged (infringement)", () => {
-	it("flags the account with the 'infring' pattern and reports telemetry", async () => {
+	it("invalidates the provider with the 'infring' pattern and reports telemetry", async () => {
 		const upstream = await listen((req, res) => {
 			res.writeHead(403, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({
@@ -1279,7 +1280,7 @@ describe("proxy e2e: 403 flagged (infringement)", () => {
 		});
 		endpointOverrides.splice(0, endpointOverrides.length, upstream.url);
 
-		const tracking = { markFlagged: 0, finishRequest: 0 };
+		const tracking = { markProviderInvalid: 0, finishRequest: 0 };
 		const rotator = {
 			getActiveAccount: async () => makeAccount("flag@example.com"),
 			rotateToNext: async () => null,
@@ -1298,7 +1299,8 @@ describe("proxy e2e: 403 flagged (infringement)", () => {
 				poolHealthyCount: 4,
 				uptimeSeconds: 600,
 			}),
-			markFlagged: () => { tracking.markFlagged++; },
+			markFlagged: () => {},
+			markProviderInvalid: () => { tracking.markProviderInvalid++; },
 			markError: () => {},
 			recordRequest: () => false,
 			recordProxyEvent: () => {},
@@ -1318,7 +1320,7 @@ describe("proxy e2e: 403 flagged (infringement)", () => {
 			if (!outcome.ok) {
 				assert.ok([429, 503].includes(outcome.status));
 			}
-			assert.equal(tracking.markFlagged, 1, "flagged 403 should mark the account");
+			assert.equal(tracking.markProviderInvalid, 1, "flagged 403 should invalidate the provider");
 			assert.equal(tracking.finishRequest, 1, "flagged 403 should release the account once");
 		} finally {
 			await upstream.close();

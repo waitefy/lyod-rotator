@@ -667,7 +667,7 @@ describe("v2 routing and status", () => {
     }
   });
 
-  it("keeps the provider verification reason when a kickstart flags an account", async () => {
+  it("keeps the provider verification reason when a kickstart invalidates the provider credential", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response(JSON.stringify({
       error: {
@@ -686,12 +686,11 @@ describe("v2 routing and status", () => {
 
       const result = await rotator.kickstartTimerForAccount("a@example.com", "claude", false);
       assert.equal(result.status, 403);
-      assert.equal(account.flagged, true);
+      // Provider-scoped: invalidProviders should be set, not account.flagged
+      assert.ok(account.invalidProviders?.["google-antigravity"], "provider should be marked invalid");
       assert.match(account.lastError, /Verify your account to continue/);
       assert.match(account.lastError, /VALIDATION_REQUIRED/);
-      await rotator.saveState();
-      assert.equal(getCachedState()?.accounts["a@example.com"].flagReason, account.lastError);
-      account.flagged = false;
+      account.invalidProviders = undefined;
       account.lastError = null;
       await rotator.saveState();
     } finally {

@@ -61,6 +61,13 @@
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-10-17
+
+### Fixed
+
+- **Provider-scoped auth failures**: a 401/403 from one provider now invalidates only that provider's credential on that account. Previously only `openai-codex` did this; `google-antigravity`, `ollama` and `opencode-zen` quota polling, proxied requests, kickstart and token refresh called `markFlagged`, quarantining the whole account — so an OpenCode Zen API-key rotation, for example, took the same account's Google, Ollama and Codex credentials out of rotation too. Sibling providers with valid credits keep serving the account.
+- **Token refresh failures**: a failed token refresh marks only the affected provider's credential invalid instead of counting errors on the whole account.
+
 ## [4.2.0] - 2026-10-14
 
 ### Added

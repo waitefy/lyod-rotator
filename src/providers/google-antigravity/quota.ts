@@ -216,14 +216,16 @@ export async function fetchProviderQuota(
         const errorText = await response.text();
         if (!isCurrentGeneration()) return;
         ctx.log(
-          `${account.config.email}: quota API returned ${response.status}, flagging account`,
+          `${account.config.email}: quota API returned ${response.status}, invalidating provider credential`,
         );
         ctx.reportQuotaPollFlag(account, response.status, errorText);
-        ctx.markFlagged(
-          account,
-          `Quota API ${response.status}: ${errorText}`,
-          { triggerProtectivePause: false },
-        );
+        if (ctx.markProviderInvalid) {
+          ctx.markProviderInvalid(
+            account,
+            DEFAULT_PROVIDER,
+            `Quota API ${response.status}: ${errorText}`,
+          );
+        }
       }
       return;
     }
