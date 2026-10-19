@@ -1000,3 +1000,35 @@ describe("Antigravity request queue", () => {
     assert.ok(second);
   });
 });
+
+describe("Antigravity transport recovery admission", () => {
+  it("skips transport-cooled accounts during admission and restores them after expiry", async () => {
+    const { rotator, accounts } = makeRotator();
+    const first = await rotator.getActiveAccount(GEMINI_MODEL);
+    assert.ok(first);
+    rotator.setProviderCooldown(first, "google-antigravity", 180_000);
+    rotator.finishRequest(first, "gemini");
+    const second = await rotator.rotateToNext(GEMINI_MODEL, first);
+    assert.ok(second);
+    rotator.setProviderCooldown(second, "google-antigravity", 180_000);
+    const third = await rotator.rotateToNext(GEMINI_MODEL, second);
+    assert.ok(third);
+    assert.notEqual(third, first);
+    assert.notEqual(third, second);
+    const admitted = await rotator.getActiveAccount(GEMINI_MODEL);
+    assert.ok(admitted);
+    assert.notEqual(admitted, first);
+    assert.notEqual(admitted, second);
+    rotator.finishRequest(admitted, "gemini");
+    for (const account of accounts) {
+      rotator.setProviderCooldown(account, "google-antigravity", 180_000);
+    }
+    first.providerCooldowns!["google-antigravity"] = Date.now() - 1;
+    const restored = await rotator.getActiveAccount(GEMINI_MODEL);
+    assert.equal(restored, first);
+    rotator.finishRequest(restored, "gemini");
+    assert.equal(first.cooldownsByModel.gemini, undefined);
+    assert.equal(first.quota.find((quota) => quota.modelKey === "gemini")?.percentRemaining, 100);
+    await rotator.flushPendingStateSave();
+  });
+});

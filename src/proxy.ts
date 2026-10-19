@@ -1530,6 +1530,13 @@ export async function withRotation<T>(
           totalMs: Date.now() - requestStartMs,
         };
       }
+      // A transport failure must affect admission, not just exclude the last
+      // account during rotation. Otherwise timer-first selection can bounce
+      // A -> B -> A while healthy accounts with fresh windows remain unused.
+      // Keep this separate from quota/auth failures and scope it to the provider.
+      if (providerId === "google-antigravity") {
+        rotator.setProviderCooldown(account, providerId, 180_000);
+      }
       if (attempt >= maxRetries) {
         return {
           ok: false,

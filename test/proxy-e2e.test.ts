@@ -113,6 +113,7 @@ function makeRotator(
 			return accounts[activeIndex];
 		},
 		finishRequest: () => { tracking.finishRequest!++; },
+		setProviderCooldown: () => {},
 		getSafetyJitterMs: () => 0,
 		recordUpstreamAttempt: () => {},
 		markExhausted: (
@@ -1483,6 +1484,45 @@ describe("proxy e2e: native Gemini thinkingLevel passthrough", () => {
 });
 
 describe("proxy e2e: endpoint cascade", () => {
+	it("temporarily excludes failed Antigravity accounts instead of retrying A-B-A", async (t) => {
+		const accounts = ["a", "b", "c"].map((name) => makeAccount(`${name}@example.invalid`));
+		const tracking: RotatorTracking = {};
+		const rotator = makeRotator(accounts[0], tracking);
+		let active = accounts[0];
+		const cooled: string[] = [];
+		t.mock.method(rotator, "getActiveAccount", async () => active);
+		t.mock.method(rotator, "rotateToNext", async () => {
+			const next = accounts.find((candidate) => candidate !== active &&
+				(candidate.providerCooldowns?.["google-antigravity"] ?? 0) <= Date.now());
+			if (next) active = next;
+			return next ?? null;
+		});
+		Object.assign(rotator, { setProviderCooldown(account: AccountRuntime, provider: string, durationMs: number) {
+			assert.equal(provider, "google-antigravity");
+			assert.equal(durationMs, 180_000);
+			account.providerCooldowns = { [provider]: Date.now() + durationMs };
+			cooled.push(account.config.email);
+		} });
+		const attempted: string[] = [];
+		t.mock.method(globalThis, "fetch", async () => {
+			attempted.push(active.config.email);
+			if (active !== accounts[2]) {
+				throw Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+			}
+			return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n', {
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		});
+		const outcome = await withRotation(rotator, "gemini-3.8-flash-high", {}, {
+			...makeBody(), model: "gemini-3.8-flash-high",
+		}, (response) => response.text());
+		assert.equal(outcome.ok, true);
+		assert.deepEqual(attempted, accounts.map((account) => account.config.email));
+		assert.deepEqual(cooled, accounts.slice(0, 2).map((account) => account.config.email));
+		assert.equal(tracking.finishRequest, 3);
+		assert.equal(tracking.markError, 0);
+		assert.equal(tracking.markExhausted, 0);
+	});
 	it("bounds silent-stream retries and releases every admitted account", async (t) => {
 		const realSetTimeout = globalThis.setTimeout;
 		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
