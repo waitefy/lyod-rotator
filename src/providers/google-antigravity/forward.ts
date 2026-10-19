@@ -24,8 +24,9 @@ import {
 } from "../../fetch-with-retry.js";
 
 const forwardLogger = logger.child("google-forward");
-// Measured valid continuations can take longer than 60s to return headers.
-export const ANTIGRAVITY_HEADERS_TIMEOUT_MS = 120_000;
+// Measured valid continuations returned headers after 187s; allow the same
+// ten-minute budget as stream startup without an earlier transport deadline.
+export const ANTIGRAVITY_HEADERS_TIMEOUT_MS = 600_000;
 
 /** Max bytes kept in the SSE event buffer. A single event is rarely >1MB;
  *  if it is, we keep the last 1MB which is still enough to find usage. */
@@ -428,7 +429,7 @@ export async function forwardRequest(
         headers: forwardHeaders,
         body: requestBody,
         signal: requestSignal,
-        dispatcher: getAccountProxyDispatcher(account, "google-antigravity", ANTIGRAVITY_STREAM_START_TIMEOUT_MS + 60_000),
+        dispatcher: getAccountProxyDispatcher(account, "google-antigravity", ANTIGRAVITY_STREAM_START_TIMEOUT_MS + 60_000, ANTIGRAVITY_HEADERS_TIMEOUT_MS + 60_000),
       } as RequestInitWithDispatcher).finally(() => {
         if (timeout) clearTimeout(timeout);
       });

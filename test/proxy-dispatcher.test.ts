@@ -131,6 +131,18 @@ describe("account proxy dispatchers", () => {
     }
   });
 
+  it("isolates header budgets while retaining the body budget for direct, HTTP and SOCKS agents", () => {
+    for (const proxyUrl of [undefined, "http://proxy-a.example:8080", "socks5://proxy-a.example:1080"]) {
+      const current = account(proxyUrl);
+      const slow = getAccountProxyDispatcher(current, "google-antigravity", 660_000, 660_000);
+      assert.ok(slow);
+      assert.strictEqual(slow, getAccountProxyDispatcher(current, "google-antigravity", 660_000, 660_000));
+      assert.notStrictEqual(slow, getAccountProxyDispatcher(current, "google-antigravity", 660_000));
+      assert.notStrictEqual(slow, getAccountProxyDispatcher(current, "google-antigravity", 660_000, 720_000));
+      assert.ok(getAccountProxyDispatcher(current, "google-antigravity", undefined, 660_000));
+    }
+  });
+
 	it("rejects unsupported proxy schemes without exposing proxy credentials", () => {
 		const result = validateAccountConfig({
 			email: "proxy@example.com",
