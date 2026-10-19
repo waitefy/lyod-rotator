@@ -1,5 +1,5 @@
 // Keep HTTP 200 recoverable until an answer, tool call or terminal event arrives.
-export const ANTIGRAVITY_STREAM_START_TIMEOUT_MS = 60_000;
+export const ANTIGRAVITY_STREAM_START_TIMEOUT_MS = 120_000;
 const MAX_PREFLIGHT_BYTES = 256 * 1024;
 
 export class AntigravityStreamStartError extends Error {

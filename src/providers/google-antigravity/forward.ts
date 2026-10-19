@@ -419,6 +419,7 @@ export async function forwardRequest(
           : signal ?? controller?.signal;
 
       const response = await fetchWithHeadersTimeout(url, {
+        timeoutMs: 60_000,
         method: "POST",
         headers: forwardHeaders,
         body: requestBody,
