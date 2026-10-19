@@ -27,6 +27,15 @@ export class UpstreamHeadersTimeoutError extends Error {
 	}
 }
 
+/** Recognize both our deadline and Undici's direct or fetch-wrapped error. */
+export function isUpstreamHeadersTimeoutError(error: unknown): boolean {
+	if (!error || typeof error !== "object") return false;
+	if ("code" in error && error.code === "UND_ERR_HEADERS_TIMEOUT") return true;
+	const cause = "cause" in error ? error.cause : undefined;
+	return !!cause && typeof cause === "object" &&
+		"code" in cause && cause.code === "UND_ERR_HEADERS_TIMEOUT";
+}
+
 export interface FetchWithHeadersTimeoutOptions extends RequestInit {
 	timeoutMs?: number;
 	fetchImpl?: typeof fetch;

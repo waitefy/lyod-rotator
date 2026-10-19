@@ -95,7 +95,7 @@ import {
 import { requireAdmin } from "./admin-auth.js";
 import { PayloadTooLargeError, readLimitedBody } from "./body-limit.js";
 import { validateConfig, validateProxyRequestBody } from "./validators.js";
-import { calculateBackoffMs } from "./fetch-with-retry.js";
+import { calculateBackoffMs, isUpstreamHeadersTimeoutError } from "./fetch-with-retry.js";
 import { logger } from "./logger.js";
 import {
   trackFeature,
@@ -1502,6 +1502,27 @@ export async function withRotation<T>(
         return { ok: false, status: 499, errorText: "Client closed request" };
       }
       const formattedError = formatError(err);
+      if (providerId === "google-antigravity" && isUpstreamHeadersTimeoutError(err)) {
+        // A slow generation is not evidence of bad credentials or quota. Avoid
+        // starting the same work again on another account after a long wait.
+        logRequestEnd("headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
+        return {
+          ok: false,
+          status: 504,
+          errorText: "Google Antigravity response headers timed out; request was not retried",
+          context: {
+            account,
+            label,
+            modelKey,
+            displayModelKey,
+            requestId,
+            requestStartMs,
+            endpoint: "unknown",
+            retries: attempt,
+          },
+          totalMs: Date.now() - requestStartMs,
+        };
+      }
       log(
         `[${label}] Request failed: ${formattedError}`,
         rotator,

@@ -6,9 +6,11 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, it } from "node:test";
 import {
   startProxy,
+  forwardRequest,
   withRotation,
   type RequestBody,
 } from "../src/proxy.js";
@@ -21,6 +23,7 @@ import {
 import { fetchProviderQuota } from "../src/providers/google-antigravity/quota.js";
 import { dynamicCatalog } from "../src/providers/google-antigravity/dynamic-catalog.js";
 import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "../src/providers/google-antigravity/stream-start.js";
+import { UpstreamHeadersTimeoutError } from "../src/fetch-with-retry.js";
 
 const endpointOverrides = ANTIGRAVITY_ENDPOINTS as unknown as string[];
 const originalEndpoints = [...endpointOverrides];
@@ -1484,6 +1487,98 @@ describe("proxy e2e: native Gemini thinkingLevel passthrough", () => {
 });
 
 describe("proxy e2e: endpoint cascade", () => {
+	it("allows Antigravity headers to arrive after 68 seconds", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		endpointOverrides.splice(0, endpointOverrides.length, "https://upstream.example.invalid");
+		let complete!: (response: Response) => void;
+		let signal: AbortSignal | null | undefined;
+		t.mock.method(globalThis, "fetch", async (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+			complete = resolve;
+			signal = init?.signal;
+			signal?.addEventListener("abort", () => reject(signal?.reason), { once: true });
+		}));
+		const pending = forwardRequest(makeAccount("slow@example.invalid"), makeBody(), {})
+			.then((value) => ({ value }), (error: unknown) => ({ error }));
+		await setImmediate();
+		t.mock.timers.tick(68_000);
+		await setImmediate();
+		assert.equal(signal?.aborted, false, "a valid slow request must survive the old 60s deadline");
+		complete(new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n', {
+			headers: { "Content-Type": "text/event-stream" },
+		}));
+		const result = await pending;
+		assert.ok("value" in result);
+		assert.match(await result.value.response.text(), /ok/);
+	});
+
+	it("aborts missing Antigravity headers at 120 seconds and releases the account once", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		endpointOverrides.splice(0, endpointOverrides.length, "https://upstream.example.invalid");
+		let signal: AbortSignal | null | undefined;
+		let calls = 0;
+		t.mock.method(globalThis, "fetch", async (_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+			calls++;
+			signal = init?.signal;
+			signal?.addEventListener("abort", () => reject(signal?.reason), { once: true });
+		}));
+		const tracking: RotatorTracking = {};
+		const rotator = makeRotator(makeAccount("slow@example.invalid"), tracking, {
+			accounts: [makeAccount("unused@example.invalid")], streamRecoveryMaxRetries: 2,
+		});
+		const pending = withRotation(rotator, "gemini-3.8-flash-high", {}, {
+			...makeBody(), model: "gemini-3.8-flash-high",
+		}, async () => { assert.fail("a headers timeout must not reach the writer"); });
+		await setImmediate();
+		t.mock.timers.tick(119_999);
+		assert.equal(signal?.aborted, false);
+		t.mock.timers.tick(1);
+		const outcome = await pending;
+		assert.equal(signal?.aborted, true);
+		assert.equal(outcome.ok, false);
+		if (!outcome.ok) assert.equal(outcome.status, 504);
+		assert.equal(calls, 1);
+		assert.equal(tracking.finishRequest, 1);
+		assert.equal(tracking.rotations, 0);
+	});
+
+	for (const [kind, error] of [
+		["guard", new UpstreamHeadersTimeoutError(120_000)],
+		["undici", Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" })],
+		["wrapped undici", new TypeError("fetch failed", {
+			cause: Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
+		})],
+	] as const) {
+		it(`does not repeat a ${kind} headers timeout across endpoints or accounts`, async (t) => {
+			endpointOverrides.splice(0, endpointOverrides.length,
+				"https://first.example.invalid", "https://second.example.invalid");
+			let calls = 0;
+			t.mock.method(globalThis, "fetch", async () => { calls++; throw error; });
+			const tracking: RotatorTracking = {};
+			const rotator = makeRotator(makeAccount("slow@example.invalid"), tracking, {
+				accounts: [makeAccount("unused@example.invalid")], streamRecoveryMaxRetries: 2,
+			});
+			const cooldown = t.mock.method(rotator, "setProviderCooldown", () => {});
+			const events: string[] = [];
+			t.mock.method(rotator, "recordProxyEvent", (message: string) => { events.push(message); });
+			const outcome = await withRotation(rotator, "gemini-3.8-flash-high", {}, {
+				...makeBody(), model: "gemini-3.8-flash-high",
+			}, async () => { assert.fail("a headers timeout must not reach the writer"); });
+			assert.equal(outcome.ok, false);
+			if (!outcome.ok) {
+				assert.equal(outcome.status, 504);
+				assert.match(outcome.errorText, /response headers.*not retried/i);
+				assert.equal(outcome.context?.retries, 0);
+			}
+			assert.equal(calls, 1);
+			assert.equal(tracking.rotations, 0);
+			assert.equal(tracking.finishRequest, 1);
+			assert.equal(tracking.markError, 0);
+			assert.equal(tracking.markExhausted, 0);
+			assert.equal(cooldown.mock.callCount(), 0);
+			assert.ok(events.some((event) => event.includes("headers-timeout") && event.includes("retry=false")));
+		});
+	}
+
 	it("temporarily excludes failed Antigravity accounts instead of retrying A-B-A", async (t) => {
 		const accounts = ["a", "b", "c"].map((name) => makeAccount(`${name}@example.invalid`));
 		const tracking: RotatorTracking = {};
@@ -1507,7 +1602,7 @@ describe("proxy e2e: endpoint cascade", () => {
 		t.mock.method(globalThis, "fetch", async () => {
 			attempted.push(active.config.email);
 			if (active !== accounts[2]) {
-				throw Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+				throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
 			}
 			return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n', {
 				headers: { "Content-Type": "text/event-stream" },

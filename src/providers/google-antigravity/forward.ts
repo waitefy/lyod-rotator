@@ -19,10 +19,13 @@ import { awaitAntigravityStreamStart } from "./stream-start.js";
 import { observeAntigravityStream } from "./stream-diagnostics.js";
 import {
   fetchWithHeadersTimeout,
+  isUpstreamHeadersTimeoutError,
   type RequestInitWithDispatcher,
 } from "../../fetch-with-retry.js";
 
 const forwardLogger = logger.child("google-forward");
+// Measured valid continuations can take longer than 60s to return headers.
+export const ANTIGRAVITY_HEADERS_TIMEOUT_MS = 120_000;
 
 /** Max bytes kept in the SSE event buffer. A single event is rarely >1MB;
  *  if it is, we keep the last 1MB which is still enough to find usage. */
@@ -419,14 +422,15 @@ export async function forwardRequest(
           : signal ?? controller?.signal;
 
       const response = await fetchWithHeadersTimeout(url, {
-        timeoutMs: 60_000,
+        timeoutMs: ANTIGRAVITY_HEADERS_TIMEOUT_MS,
         method: "POST",
         headers: forwardHeaders,
         body: requestBody,
         signal: requestSignal,
         dispatcher: getAccountProxyDispatcher(account, "google-antigravity"),
-      } as RequestInitWithDispatcher);
-      if (timeout) clearTimeout(timeout);
+      } as RequestInitWithDispatcher).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
 
       if (
         (response.status === 401 ||
@@ -443,7 +447,9 @@ export async function forwardRequest(
 
       return { response: await awaitAntigravityStreamStart(observeAntigravityStream(response), signal), endpoint };
     } catch (err) {
-      if (signal?.aborted) throw err;
+      // Do not restart a slow generation on another endpoint after the full
+      // headers deadline. Explicit status errors and connection failures still cascade.
+      if (signal?.aborted || isUpstreamHeadersTimeoutError(err)) throw err;
       if (endpointIdx < ANTIGRAVITY_ENDPOINTS.length - 1) {
         forwardLogger.log("info",
           `Endpoint ${endpoint} failed: ${
