@@ -217,6 +217,8 @@ import { STREAM_BACKPRESSURE_TIMEOUT_MS } from "./stream-guards.js";
 
 const proxyLogger = logger.child("proxy");
 const GENERIC_UPSTREAM_ERROR = "Upstream request failed";
+const ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE =
+  "Google Antigravity response headers timed out; request was not retried";
 
 const DEFAULT_STREAM_RECOVERY_MAX_RETRIES = 2;
 const MAX_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes max cooldown
@@ -1509,7 +1511,7 @@ export async function withRotation<T>(
         return {
           ok: false,
           status: 504,
-          errorText: "Google Antigravity response headers timed out; request was not retried",
+          errorText: ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE,
           context: {
             account,
             label,
@@ -2138,6 +2140,15 @@ async function handleProxyRequest(
     } catch (err) {
       if (clientController.signal.aborted || res.destroyed) return;
       const formattedError = formatError(err);
+      if (providerId === "google-antigravity" && isUpstreamHeadersTimeoutError(err)) {
+        recordOutcome(504);
+        logRequestEnd("headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
+        if (!res.headersSent) {
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE }));
+        } else res.end();
+        return;
+      }
       proxyLog(
         `[${label}] Request failed: ${formattedError}`,
         isFetchTransportError(err) ? "warn" : "error",

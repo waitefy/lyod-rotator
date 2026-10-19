@@ -1579,6 +1579,42 @@ describe("proxy e2e: endpoint cascade", () => {
 		});
 	}
 
+	for (const path of ["/v1internal:streamGenerateContent?alt=sse", "/v1/chat/completions"]) {
+		it(`returns a headers timeout without replaying work through ${path}`, async (t) => {
+			endpointOverrides.splice(0, endpointOverrides.length, "https://upstream.example.invalid");
+			const realFetch = globalThis.fetch;
+			let calls = 0;
+			t.mock.method(globalThis, "fetch", async () => {
+				calls++;
+				throw new UpstreamHeadersTimeoutError(120_000);
+			});
+			const tracking: RotatorTracking = {};
+			const rotator = makeRotator(makeAccount("slow@example.invalid"), tracking, {
+				accounts: [makeAccount("unused@example.invalid")], streamRecoveryMaxRetries: 2,
+			});
+			const proxy = startProxy(rotator, 0, "127.0.0.1");
+			await once(proxy, "listening");
+			const address = proxy.address();
+			assert.ok(address && typeof address !== "string");
+			try {
+				const response = await realFetch(`http://127.0.0.1:${address.port}${path}`, {
+					method: "POST", headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(path.startsWith("/v1internal")
+						? { ...makeBody(), model: "gemini-3.8-flash-high" }
+						: { model: "gemini-3.8-flash-high", messages: [{ role: "user", content: "hello" }], stream: true }),
+				});
+				assert.equal(response.status, 504);
+				assert.match(await response.text(), /response headers.*not retried/i);
+				assert.equal(calls, 1);
+				assert.equal(tracking.finishRequest, 1);
+				assert.equal(tracking.rotations, 0);
+				assert.equal(tracking.markError, 0);
+			} finally {
+				await new Promise<void>((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve()));
+			}
+		});
+	}
+
 	it("temporarily excludes failed Antigravity accounts instead of retrying A-B-A", async (t) => {
 		const accounts = ["a", "b", "c"].map((name) => makeAccount(`${name}@example.invalid`));
 		const tracking: RotatorTracking = {};
