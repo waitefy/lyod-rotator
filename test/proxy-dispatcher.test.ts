@@ -119,6 +119,18 @@ describe("account proxy dispatchers", () => {
 		assert.equal(getAccountProxyDispatcher(account("http://proxy-a.example:8080"), "ollama"), undefined);
 	});
 
+  it("isolates long-generation transport budgets from default direct and proxy agents", () => {
+    for (const proxyUrl of [undefined, "http://proxy-a.example:8080", "socks5://proxy-a.example:1080"]) {
+      const current = account(proxyUrl);
+      const normal = getAccountProxyDispatcher(current, "google-antigravity");
+      const slow = getAccountProxyDispatcher(current, "google-antigravity", 660_000);
+      assert.ok(slow);
+      assert.notStrictEqual(normal, slow);
+      assert.strictEqual(slow, getAccountProxyDispatcher(current, "google-antigravity", 660_000));
+      assert.notStrictEqual(slow, getAccountProxyDispatcher(current, "google-antigravity", 720_000));
+    }
+  });
+
 	it("rejects unsupported proxy schemes without exposing proxy credentials", () => {
 		const result = validateAccountConfig({
 			email: "proxy@example.com",

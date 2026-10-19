@@ -214,11 +214,15 @@ import { authenticateVirtualKey, sendAuthErrorResponse } from "./key-auth.js";
 import { logSpend } from "./spend-logger.js";
 import { hashKey } from "./virtual-keys.js";
 import { STREAM_BACKPRESSURE_TIMEOUT_MS } from "./stream-guards.js";
+import { AntigravityStreamSilenceTimeoutError, ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./providers/google-antigravity/stream-start.js";
 
 const proxyLogger = logger.child("proxy");
 const GENERIC_UPSTREAM_ERROR = "Upstream request failed";
 const ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE =
   "Google Antigravity response headers timed out; request was not retried";
+
+const ANTIGRAVITY_SILENCE_TIMEOUT_MESSAGE =
+  "Google Antigravity produced no progress for 600 seconds; request was not retried; account was not penalized";
 
 const DEFAULT_STREAM_RECOVERY_MAX_RETRIES = 2;
 const MAX_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes max cooldown
@@ -864,6 +868,7 @@ async function streamResponseBody(
   responseStatus: number,
   responseHeaders: Record<string, string>,
   accumulator: StreamAccumulator = new SseEventAccumulator(),
+  idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
 ): Promise<{
   inputTokens: number;
   outputTokens: number;
@@ -977,14 +982,14 @@ async function streamResponseBody(
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         const error = new Error(
-          `idle timeout after ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s`,
+          `idle timeout after ${Math.round(idleTimeoutMs / 1000)}s`,
         );
         if (hasForwardedBytes) emitStreamError(error);
         finish(
           error.message,
         );
         if (!nodeStream.destroyed) nodeStream.destroy();
-      }, STREAM_IDLE_TIMEOUT_MS);
+      }, idleTimeoutMs);
     };
 
     const onData = (chunk: Buffer): void => {
@@ -1504,14 +1509,16 @@ export async function withRotation<T>(
         return { ok: false, status: 499, errorText: "Client closed request" };
       }
       const formattedError = formatError(err);
-      if (providerId === "google-antigravity" && isUpstreamHeadersTimeoutError(err)) {
+      if (providerId === "google-antigravity" &&
+          (isUpstreamHeadersTimeoutError(err) || err instanceof AntigravityStreamSilenceTimeoutError)) {
+        const silence = err instanceof AntigravityStreamSilenceTimeoutError;
         // A slow generation is not evidence of bad credentials or quota. Avoid
         // starting the same work again on another account after a long wait.
-        logRequestEnd("headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
+        logRequestEnd(silence ? "silence-timeout" : "headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
         return {
           ok: false,
           status: 504,
-          errorText: ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE,
+          errorText: silence ? ANTIGRAVITY_SILENCE_TIMEOUT_MESSAGE : ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE,
           context: {
             account,
             label,
@@ -2085,6 +2092,7 @@ async function handleProxyRequest(
           response.status,
           responseHeaders,
           provider.createStreamAccumulator(),
+          providerId === "google-antigravity" ? ANTIGRAVITY_STREAM_START_TIMEOUT_MS : STREAM_IDLE_TIMEOUT_MS,
         );
         const totalMs = Date.now() - requestStartMs;
         const ttfbMs = usage?.firstByteMs ?? totalMs;
@@ -2140,12 +2148,14 @@ async function handleProxyRequest(
     } catch (err) {
       if (clientController.signal.aborted || res.destroyed) return;
       const formattedError = formatError(err);
-      if (providerId === "google-antigravity" && isUpstreamHeadersTimeoutError(err)) {
+      if (providerId === "google-antigravity" &&
+          (isUpstreamHeadersTimeoutError(err) || err instanceof AntigravityStreamSilenceTimeoutError)) {
+        const silence = err instanceof AntigravityStreamSilenceTimeoutError;
         recordOutcome(504);
-        logRequestEnd("headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
+        logRequestEnd(silence ? "silence-timeout" : "headers-timeout", `retry=false error=${formattedError.slice(0, 120)}`);
         if (!res.headersSent) {
           res.writeHead(504, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE }));
+          res.end(JSON.stringify({ error: silence ? ANTIGRAVITY_SILENCE_TIMEOUT_MESSAGE : ANTIGRAVITY_HEADERS_TIMEOUT_MESSAGE }));
         } else res.end();
         return;
       }

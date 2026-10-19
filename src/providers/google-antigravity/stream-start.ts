@@ -1,11 +1,17 @@
-// Keep HTTP 200 recoverable until an answer, tool call or terminal event arrives.
-export const ANTIGRAVITY_STREAM_START_TIMEOUT_MS = 120_000;
+// Trial idle budget, not a measured maximum generation time. Keep HTTP 200
+// recoverable until an answer, tool call or terminal event arrives.
+export const ANTIGRAVITY_STREAM_START_TIMEOUT_MS = 600_000;
 const MAX_PREFLIGHT_BYTES = 256 * 1024;
 
 export class AntigravityStreamStartError extends Error {
   // The rotation layer treats this as transport failure, not invalid credentials.
   readonly code = "ETIMEDOUT";
   override name = "AntigravityStreamStartError";
+}
+
+/** Silence alone must not trigger another generation on a different account. */
+export class AntigravityStreamSilenceTimeoutError extends AntigravityStreamStartError {
+  override name = "AntigravityStreamSilenceTimeoutError";
 }
 
 function classifyModelEvent(data: string): "ready" | "thinking" | "none" {
@@ -54,7 +60,7 @@ export async function awaitAntigravityStreamStart(
   const deadline = new Promise<never>((_resolve, reject) => {
     resetDeadline = () => {
       clearTimeout(timer);
-      timer = setTimeout(() => reject(new AntigravityStreamStartError(
+      timer = setTimeout(() => reject(new AntigravityStreamSilenceTimeoutError(
         `Antigravity produced no model event or thinking progress within ${timeoutMs}ms`,
       )), timeoutMs);
     };

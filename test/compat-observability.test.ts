@@ -7,6 +7,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { once } from "node:events";
+import { setImmediate } from "node:timers/promises";
 import type { AddressInfo } from "node:net";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, it } from "node:test";
@@ -995,6 +996,37 @@ describe("compat observability", () => {
       stream: true,
     });
   });
+
+  for (const kind of ["chat", "responses"] as const) {
+    it(`allows long Antigravity gaps in ${kind} without widening other providers`, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      for (const providerId of ["google-antigravity", "ollama"]) {
+        const res = responseStub();
+        const req = new PassThrough() as unknown as IncomingMessage;
+        let source!: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({ start(controller) { source = controller; } });
+        const context = {
+          account: createAccount(), label: "test", modelKey: "test", displayModelKey: "test",
+          requestId: "trial", requestStartMs: Date.now(), endpoint: "test", retries: 0, providerId,
+        };
+        const pending = kind === "chat"
+          ? streamCompatSse(body, req, res, "gemini-3.8-flash-high", "openai", context)
+          : streamResponsesSse(body, req, res, { model: "gemini-3.8-flash-high", input: "test", stream: true },
+            "resp_trial", null, 0, context);
+        let settled = false;
+        void pending.then(() => { settled = true; });
+        await setImmediate();
+        t.mock.timers.tick(120_001);
+        await setImmediate();
+        assert.equal(settled, providerId !== "google-antigravity");
+        if (providerId === "google-antigravity") {
+          source.close();
+          const result = await pending;
+          assert.equal(result.streamError, undefined);
+        } else assert.match((await pending).streamError ?? "", /idle timeout/);
+      }
+    });
+  }
 
   it("terminates compatibility streams that stay idle after headers", async () => {
     const silentBody = new ReadableStream<Uint8Array>({

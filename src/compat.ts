@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./providers/google-antigravity/stream-start.js";
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
 import { validateGeneratedWebImage, validateWebImageRequest, webGeminiImageMode, webResponsesImageMode, type WebImageMode } from "./providers/gemini-web/image-output.js";
@@ -1166,7 +1167,8 @@ export async function streamCompatSse(
   const idleGuard = createStreamIdleGuard((error) => {
     streamError = error.message;
     if (!nodeStream.destroyed) nodeStream.destroy(error);
-  }, options.idleTimeoutMs);
+  }, options.idleTimeoutMs ?? (context?.providerId === "google-antigravity"
+    ? ANTIGRAVITY_STREAM_START_TIMEOUT_MS : undefined));
 
   const streamDecoder = new StringDecoder("utf8");
   try {
@@ -1574,7 +1576,8 @@ export async function streamResponsesSse(
   const idleGuard = createStreamIdleGuard((error) => {
     streamError = error.message;
     if (!nodeStream.destroyed) nodeStream.destroy(error);
-  }, options.idleTimeoutMs);
+  }, options.idleTimeoutMs ?? (context?.providerId === "google-antigravity"
+    ? ANTIGRAVITY_STREAM_START_TIMEOUT_MS : undefined));
 
   const rotatorHeaders = buildRotatorResponseHeaders({
     accountLabel: context?.label,

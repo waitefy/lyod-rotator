@@ -22,7 +22,7 @@ import {
 } from "../src/rotator.js";
 import { fetchProviderQuota } from "../src/providers/google-antigravity/quota.js";
 import { dynamicCatalog } from "../src/providers/google-antigravity/dynamic-catalog.js";
-import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "../src/providers/google-antigravity/stream-start.js";
+import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS, AntigravityStreamSilenceTimeoutError } from "../src/providers/google-antigravity/stream-start.js";
 import { UpstreamHeadersTimeoutError } from "../src/fetch-with-retry.js";
 
 const endpointOverrides = ANTIGRAVITY_ENDPOINTS as unknown as string[];
@@ -1615,6 +1615,48 @@ describe("proxy e2e: endpoint cascade", () => {
 		});
 	}
 
+  for (const path of ["/v1internal:streamGenerateContent?alt=sse", "/v1/chat/completions", "/v1/responses"]) {
+    it(`does not replay a silence deadline through ${path}`, async (t) => {
+      endpointOverrides.splice(0, endpointOverrides.length,
+        "https://first.example.invalid", "https://second.example.invalid");
+      const realFetch = globalThis.fetch;
+      let calls = 0;
+      t.mock.method(globalThis, "fetch", async () => {
+        calls++;
+        throw new AntigravityStreamSilenceTimeoutError("trial silence deadline");
+      });
+      const tracking: RotatorTracking = {};
+      const rotator = makeRotator(makeAccount("slow@example.invalid"), tracking, {
+        accounts: [makeAccount("unused@example.invalid")], streamRecoveryMaxRetries: 2,
+      });
+      const cooldown = t.mock.method(rotator, "setProviderCooldown", () => {});
+      const proxy = startProxy(rotator, 0, "127.0.0.1");
+      await once(proxy, "listening");
+      const address = proxy.address();
+      assert.ok(address && typeof address !== "string");
+      try {
+        const response = await realFetch(`http://127.0.0.1:${address.port}${path}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(path.startsWith("/v1internal")
+            ? { ...makeBody(), model: "gemini-3.8-flash-high" }
+            : path === "/v1/responses"
+              ? { model: "gemini-3.8-flash-high", input: "hello", stream: true }
+              : { model: "gemini-3.8-flash-high", messages: [{ role: "user", content: "hello" }], stream: true }),
+        });
+        assert.equal(response.status, 504);
+        assert.match(await response.text(), /not retried.*not penalized/i);
+        assert.equal(calls, 1);
+        assert.equal(tracking.finishRequest, 1);
+        assert.equal(tracking.rotations, 0);
+        assert.equal(tracking.markError, 0);
+        assert.equal(tracking.markExhausted, 0);
+        assert.equal(cooldown.mock.callCount(), 0);
+      } finally {
+        await new Promise<void>((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+  }
+
 	it("temporarily excludes failed Antigravity accounts instead of retrying A-B-A", async (t) => {
 		const accounts = ["a", "b", "c"].map((name) => makeAccount(`${name}@example.invalid`));
 		const tracking: RotatorTracking = {};
@@ -1654,7 +1696,7 @@ describe("proxy e2e: endpoint cascade", () => {
 		assert.equal(tracking.markError, 0);
 		assert.equal(tracking.markExhausted, 0);
 	});
-	it("bounds silent-stream retries and releases every admitted account", async (t) => {
+	it("does not replay a silent stream or penalize its account", async (t) => {
 		const realSetTimeout = globalThis.setTimeout;
 		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
 			if (args[1] === ANTIGRAVITY_STREAM_START_TIMEOUT_MS) args[1] = 10;
@@ -1677,13 +1719,14 @@ describe("proxy e2e: endpoint cascade", () => {
 			...makeBody(), model: "gemini-3.8-flash-high",
 		}, async () => { assert.fail("silent response must not reach the writer"); });
 		assert.equal(outcome.ok, false);
-		if (!outcome.ok) assert.equal(outcome.status, 502);
-		assert.equal(calls, 2);
-		assert.equal(cancellations, 2);
-		assert.equal(tracking.finishRequest, 2);
+		if (!outcome.ok) assert.equal(outcome.status, 504);
+		assert.equal(calls, 1);
+		assert.equal(cancellations, 1);
+		assert.equal(tracking.finishRequest, 1);
+		assert.equal(tracking.rotations, 0);
 		assert.equal(tracking.markError, 0);
 	});
-	it("recovers a stalled thinking stream on another account without changing model or effort", async (t) => {
+	it("returns one explicit timeout for stalled thinking without switching accounts", async (t) => {
 		const realSetTimeout = globalThis.setTimeout;
 		t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => {
 			if (args[1] === ANTIGRAVITY_STREAM_START_TIMEOUT_MS) args[1] = 50;
@@ -1691,7 +1734,7 @@ describe("proxy e2e: endpoint cascade", () => {
 		});
 		const bodies: string[] = [];
 		const authorizations: string[] = [];
-		let cancelled = false;
+		let cancellation: Promise<unknown> | undefined;
 		const upstream = await listen((req, res) => {
 			let body = "";
 			req.on("data", (chunk) => { body += chunk.toString(); });
@@ -1701,7 +1744,7 @@ describe("proxy e2e: endpoint cascade", () => {
 				res.writeHead(200, { "Content-Type": "text/event-stream" });
 				if (bodies.length === 1) {
 					res.write('data: {"response":{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true}]}}],"usageMetadata":{"promptTokenCount":29}}}\n\n');
-					res.once("close", () => { cancelled = true; });
+					cancellation = once(res, "close");
 				} else res.end('data: {"candidates":[{"content":{"parts":[{"text":"recovered"}]}}]}\n\n');
 			});
 		});
@@ -1718,14 +1761,15 @@ describe("proxy e2e: endpoint cascade", () => {
 				callbacks++;
 				return response.text();
 			});
-			assert.equal(outcome.ok, true);
-			if (outcome.ok) assert.match(outcome.result, /recovered/);
-			assert.equal(callbacks, 1, "the stalled stream must never reach the compat writer");
-			assert.equal(bodies.length, 2);
-			assert.deepEqual(JSON.parse(bodies[0]), JSON.parse(bodies[1]));
-			assert.notEqual(authorizations[0], authorizations[1]);
-			assert.equal(cancelled, true);
-			assert.equal(tracking.finishRequest, 2);
+			assert.equal(outcome.ok, false);
+			if (!outcome.ok) assert.equal(outcome.status, 504);
+			assert.equal(callbacks, 0, "the stalled stream must never reach the compat writer");
+			assert.equal(bodies.length, 1);
+			assert.equal(authorizations.length, 1);
+			assert.ok(cancellation);
+			await cancellation;
+			assert.equal(tracking.finishRequest, 1);
+			assert.equal(tracking.rotations, 0);
 			assert.equal(tracking.markError, 0);
 		} finally { await upstream.close(); }
 	});

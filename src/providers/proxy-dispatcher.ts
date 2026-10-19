@@ -48,11 +48,11 @@ export function getProxyConfigurationError(value: unknown): string | null {
 	}
 }
 
-function createDispatcher(proxyUrl: string): Dispatcher {
+function createDispatcher(proxyUrl: string, bodyTimeout?: number): Dispatcher {
 	const normalized = normalizedProxyUrl(proxyUrl);
 	const url = new URL(normalized);
-	if (url.protocol === "socks5:") return createSocks5Dispatcher(url);
-	return new ProxyAgent({ uri: normalized, proxyTunnel: false });
+	if (url.protocol === "socks5:") return createSocks5Dispatcher(url, bodyTimeout);
+	return new ProxyAgent({ uri: normalized, proxyTunnel: false, bodyTimeout });
 }
 
 type SocksSocket = Socket | TLSSocket;
@@ -232,8 +232,9 @@ async function openSocks5Connection(
 	}
 }
 
-function createSocks5Dispatcher(proxy: URL): Dispatcher {
+function createSocks5Dispatcher(proxy: URL, bodyTimeout?: number): Dispatcher {
 	return new Agent({
+		bodyTimeout,
 		connect: (target, callback) => {
 			void openSocks5Connection(proxy, target)
 				.then((socket) => callback(null, socket))
@@ -244,19 +245,23 @@ function createSocks5Dispatcher(proxy: URL): Dispatcher {
 
 /**
  * Return the reusable dispatcher for an account/provider pair. The cache key
- * includes the complete normalized URL, including credentials, but that value
+ * includes the transport budget and complete normalized URL, including credentials, but that value
  * is never logged or returned to callers.
  */
 export function getAccountProxyDispatcher(
 	account: AccountRuntime,
 	providerId: string,
+	bodyTimeoutMs?: number,
 ): Dispatcher | undefined {
 	const configured = getProviderProxyUrl(account.config, providerId)?.trim();
-	if (!configured) return undefined;
-	const key = normalizedProxyUrl(configured);
+	if (!configured && bodyTimeoutMs === undefined) return undefined;
+	const proxyUrl = configured ? normalizedProxyUrl(configured) : undefined;
+	const key = JSON.stringify([proxyUrl, bodyTimeoutMs]);
 	const existing = dispatchers.get(key);
 	if (existing) return existing;
-	const dispatcher = createDispatcher(key);
+	const dispatcher = proxyUrl
+		? createDispatcher(proxyUrl, bodyTimeoutMs)
+		: new Agent({ bodyTimeout: bodyTimeoutMs });
 	dispatchers.set(key, dispatcher);
 	return dispatcher;
 }

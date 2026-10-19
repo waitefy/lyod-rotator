@@ -9,6 +9,7 @@ type Outcome = "eof" | "cancel" | "read_error";
 export function observeAntigravityStream(
   response: Response,
   report: (summary: Record<string, unknown>) => void = (summary) => streamLogger.info(JSON.stringify(summary)),
+  context: { account: string; model: string; endpoint: string; headersMs: number } | undefined = undefined,
 ): Response {
   if (!response.ok || !response.body ||
       !response.headers.get("content-type")?.includes("text/event-stream")) return response;
@@ -32,6 +33,12 @@ export function observeAntigravityStream(
   let firstChunkMs: number | null = null;
   let lastChunkMs: number | null = null;
   let lastEventMs: number | null = null;
+  let firstModelEventMs: number | null = null;
+  let firstOutputEventMs: number | null = null;
+  let lastModelEventMs: number | null = null;
+  let maxChunkGapMs = 0;
+  let maxModelGapMs = 0;
+  let waitTimers: ReturnType<typeof setTimeout>[] = [];
   let lastKinds: string[] = [];
   let tail = "";
   let data = "";
@@ -41,13 +48,39 @@ export function observeAntigravityStream(
 
   const emit = (summary: Record<string, unknown>): void => {
     // Logging must never change transport behaviour.
-    try { report({ id, ...summary }); } catch { /* diagnostic sink unavailable */ }
+    try { report({ ...context, id, ...summary }); } catch { /* diagnostic sink unavailable */ }
   };
-  const finish = (outcome: Outcome): void => {
+  const resetWaitNotices = (): void => {
+    for (const timer of waitTimers) clearTimeout(timer);
+    waitTimers = [30_000, 120_000].map((afterMs) => {
+      const timer = setTimeout(() => emit({ phase: "waiting", afterMs,
+        elapsedMs: Date.now() - started, sinceModelProgressMs: Date.now() - started - (lastModelEventMs ?? 0),
+        action: "keep_waiting", retry: false }), afterMs);
+      timer.unref?.();
+      return timer;
+    });
+  };
+  const modelProgress = (output = false): void => {
+    const now = Date.now() - started;
+    maxModelGapMs = Math.max(maxModelGapMs, now - (lastModelEventMs ?? 0));
+    firstModelEventMs ??= now;
+    if (output) firstOutputEventMs ??= now;
+    lastModelEventMs = now;
+    resetWaitNotices();
+  };
+  const finish = (outcome: Outcome, reason?: unknown): void => {
     if (ended) return;
     ended = true;
+    for (const timer of waitTimers) clearTimeout(timer);
     const elapsedMs = Date.now() - started;
     emit({ phase: "end", outcome, elapsedMs, firstChunkMs, lastChunkMs,
+      cancellationReason: outcome !== "cancel" ? null :
+        reason instanceof Error && reason.name === "AntigravityStreamSilenceTimeoutError"
+          ? "silence_timeout" : reason instanceof Error && reason.name === "AbortError"
+            ? "aborted" : "other",
+      firstModelEventMs, firstOutputEventMs, lastModelEventMs,
+      maxChunkGapMs: Math.max(maxChunkGapMs, elapsedMs - (lastChunkMs ?? 0)),
+      maxModelGapMs: Math.max(maxModelGapMs, elapsedMs - (lastModelEventMs ?? 0)),
       idleMs: lastChunkMs === null ? elapsedMs : elapsedMs - lastChunkMs,
       lastEventMs, chunks, bytes, events, textEvents, thinkingEvents, toolEvents,
       usageEvents, malformedEvents, oversizedEvents, sawFinish, sawDone, sawError, lastKinds });
@@ -58,14 +91,14 @@ export function observeAntigravityStream(
     events++;
     lastEventMs = Date.now() - started;
     lastKinds = [];
-    if (data.trim() === "[DONE]") { sawDone = true; lastKinds.push("done"); data = ""; return; }
+    if (data.trim() === "[DONE]") { sawDone = true; lastKinds.push("done"); modelProgress(); data = ""; return; }
     try {
       const parsed = JSON.parse(data);
       const body = parsed?.response ?? parsed;
       if (body?.error) { sawError = true; lastKinds.push("error"); }
       if (body?.promptFeedback?.blockReason) lastKinds.push("blocked");
       if (body?.usageMetadata || body?.usage) { usageEvents++; lastKinds.push("usage"); }
-      let text = false, thinking = false, tool = false;
+      let text = false, thinking = false, tool = false, media = false;
       for (const candidate of Array.isArray(body?.candidates) ? body.candidates : []) {
         if (candidate?.finishReason) { sawFinish = true; lastKinds.push("finish"); }
         for (const part of Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []) {
@@ -73,11 +106,16 @@ export function observeAntigravityStream(
             if (part.thought) thinking = true; else text = true;
           }
           if (part?.functionCall || part?.functionResponse) tool = true;
+          if (part?.inlineData || part?.fileData || part?.executableCode || part?.codeExecutionResult) media = true;
         }
       }
       if (text) { textEvents++; lastKinds.push("text"); }
       if (thinking) { thinkingEvents++; lastKinds.push("thinking"); }
       if (tool) { toolEvents++; lastKinds.push("tool"); }
+      if (media) lastKinds.push("media");
+      if (text || thinking || tool || media || lastKinds.some((kind) => ["finish", "error", "blocked"].includes(kind))) {
+        modelProgress(text || tool || media);
+      }
     } catch { malformedEvents++; lastKinds.push("malformed"); }
     data = "";
   };
@@ -91,7 +129,9 @@ export function observeAntigravityStream(
   const observe = (value: Uint8Array): void => {
     chunks++;
     bytes += value.byteLength;
-    lastChunkMs = Date.now() - started;
+    const now = Date.now() - started;
+    maxChunkGapMs = Math.max(maxChunkGapMs, now - (lastChunkMs ?? 0));
+    lastChunkMs = now;
     firstChunkMs ??= lastChunkMs;
     // Parse incrementally with bounded storage, including a huge single line.
     const decoded = decoder.decode(value, { stream: true });
@@ -116,6 +156,7 @@ export function observeAntigravityStream(
   };
 
   emit({ phase: "headers", status: response.status });
+  resetWaitNotices();
   return new Response(new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
@@ -139,7 +180,7 @@ export function observeAntigravityStream(
       }
     },
     async cancel(reason) {
-      finish("cancel");
+      finish("cancel", reason);
       try { await reader.cancel(reason); }
       finally { reader.releaseLock(); }
     },

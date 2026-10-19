@@ -179,3 +179,23 @@ it("treats premature EOF as recoverable, but never replays an established stream
   source.error(new Error("failure after generation started"));
   await assert.rejects(guarded.text(), /failure after generation started/);
 });
+
+// Virtual time: no model calls and no ten-minute wall-clock wait.
+it("keeps a silent generation alive beyond two minutes, up to the trial ten-minute gap", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  let settled = false;
+  const pending = awaitAntigravityStreamStart(new Response(new ReadableStream<Uint8Array>({
+    start(controller) { source = controller; },
+  }), { headers: { "Content-Type": "text/event-stream" } }));
+  void pending.then(() => { settled = true; }, () => { settled = true; });
+  const rejection = assert.rejects(pending, /no model event/);
+  await setImmediate();
+  t.mock.timers.tick(599_999);
+  await setImmediate();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  await rejection;
+  assert.equal(settled, true);
+  assert.ok(source);
+});

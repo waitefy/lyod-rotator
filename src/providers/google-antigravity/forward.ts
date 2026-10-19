@@ -15,7 +15,7 @@ import { logger } from "../../logger.js";
 import type { TokenUsage } from "../adapter.js";
 import { DEFAULT_PROVIDER, getProviderProjectId } from "../credential-helpers.js";
 import { getAccountProxyDispatcher } from "../proxy-dispatcher.js";
-import { awaitAntigravityStreamStart } from "./stream-start.js";
+import { awaitAntigravityStreamStart, AntigravityStreamSilenceTimeoutError, ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./stream-start.js";
 import { observeAntigravityStream } from "./stream-diagnostics.js";
 import {
   fetchWithHeadersTimeout,
@@ -421,13 +421,14 @@ export async function forwardRequest(
           ? AbortSignal.any([controller.signal, signal])
           : signal ?? controller?.signal;
 
+      const headersStarted = Date.now();
       const response = await fetchWithHeadersTimeout(url, {
         timeoutMs: ANTIGRAVITY_HEADERS_TIMEOUT_MS,
         method: "POST",
         headers: forwardHeaders,
         body: requestBody,
         signal: requestSignal,
-        dispatcher: getAccountProxyDispatcher(account, "google-antigravity"),
+        dispatcher: getAccountProxyDispatcher(account, "google-antigravity", ANTIGRAVITY_STREAM_START_TIMEOUT_MS + 60_000),
       } as RequestInitWithDispatcher).finally(() => {
         if (timeout) clearTimeout(timeout);
       });
@@ -445,11 +446,14 @@ export async function forwardRequest(
         continue;
       }
 
-      return { response: await awaitAntigravityStreamStart(observeAntigravityStream(response), signal), endpoint };
+      return { response: await awaitAntigravityStreamStart(observeAntigravityStream(response, undefined, {
+        account: account.config.label || account.config.email, model: body.model, endpoint,
+        headersMs: Date.now() - headersStarted,
+      }), signal), endpoint };
     } catch (err) {
       // Do not restart a slow generation on another endpoint after the full
-      // headers deadline. Explicit status errors and connection failures still cascade.
-      if (signal?.aborted || isUpstreamHeadersTimeoutError(err)) throw err;
+      // headers or silence deadline. Explicit status errors and connection failures still cascade.
+      if (signal?.aborted || isUpstreamHeadersTimeoutError(err) || err instanceof AntigravityStreamSilenceTimeoutError) throw err;
       if (endpointIdx < ANTIGRAVITY_ENDPOINTS.length - 1) {
         forwardLogger.log("info",
           `Endpoint ${endpoint} failed: ${
