@@ -443,6 +443,34 @@ data: [DONE]
 		assert.match(JSON.stringify(request.contents), /Context: The assistant used tools/);
 	});
 
+	it("preserves assistant text, call arguments and complete results without a cached signature", () => {
+		const resultText = "x".repeat(700) + "END_OF_TOOL_RESULT";
+		const result = openAIToAntigravityBody({
+			model: "gemini-3.8-flash-high",
+			messages: [
+				{ role: "user", content: "Continue the task" },
+				{
+					role: "assistant", content: "Inspect the pending edit before continuing.",
+					tool_calls: [{ id: "call_lossless_fallback", type: "function", function: {
+						name: "read", arguments: '{"path":"pending.ts","offset":42}',
+					} }],
+				},
+				{ role: "tool", tool_call_id: "call_lossless_fallback", content: resultText },
+			],
+		});
+		const contents = (result.request as { contents: Array<{ parts: Array<{ text?: string }> }> }).contents;
+		const history = contents.flatMap((turn) => turn.parts.map((part) => part.text || "")).join("\n");
+		assert.ok(history.includes("Inspect the pending edit before continuing."));
+		const assistantLine = history.split("\n").find((line) => line.startsWith("Assistant: "));
+		assert.ok(assistantLine);
+		const assistant = JSON.parse(assistantLine.slice("Assistant: ".length));
+		assert.equal(assistant.tool_calls[0].function.arguments, '{"path":"pending.ts","offset":42}');
+		assert.ok(history.includes(resultText));
+		assert.ok(history.includes("call_lossless_fallback"));
+		assert.ok(history.includes("read"));
+		assert.doesNotMatch(JSON.stringify(contents), /"functionCall"|"thoughtSignature"/);
+	});
+
 	it("does not leave a Gemini thinking fallback ending with a model turn", () => {
 		const callId = "call_missing_sig_model_turn_regression";
 		thoughtSignatureCache.delete(callId);
