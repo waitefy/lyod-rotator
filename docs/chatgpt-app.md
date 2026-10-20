@@ -6,6 +6,8 @@ sidecar. Initial integration targets commit
 `dbf6bf39686348449c25de3b6131ca733f448deb`.
 
 The sidecar handles the ChatGPT web protocol and emulates function calling.
+An account-scoped curl_cffi transport supplies a coherent browser HTTP/TLS
+fingerprint; the pinned sidecar's original transport failed our live smoke.
 The rotator handles explicit model routing, account selection, provider-scoped
 credential failures and the existing Chat Completions / Responses / Messages
 compatibility endpoints. Native ChatGPT API tools are not implied.
@@ -28,7 +30,7 @@ auth:
   access_tokens:
     - REPLACE_WITH_RANDOM_LOCAL_BRIDGE_KEY
   access_token_prefix: []
-chatgpt_base_url: https://chatgpt.com
+chatgpt_base_url: http://chatgpt-app-transport:3041
 chatgpts:
   - access_token: REPLACE_LOCALLY_WITH_WEB_ACCESS_TOKEN
     email: user@example.com
@@ -54,6 +56,19 @@ The port is bound only to host loopback. A containerized rotator cannot reach
 the host sidecar through its own `127.0.0.1`; use an existing protected HTTPS
 endpoint to the sidecar or an explicitly configured shared host network.
 Never expose port 3040 directly to the public network.
+
+The transport has **no published port**. It accepts the one configured account's
+Bearer token, sends only to `https://chatgpt.com`, rejects anonymous routes and
+redirects, and streams response chunks without buffering the complete answer.
+Both containers read the same private configuration. Restart the transport after
+replacing the web token. Its dependencies are pinned in
+`scripts/chatgpt-app-transport/requirements.txt`.
+
+If an upstream proxy is needed, set `LYOD_CHATGPT_APP_TRANSPORT_PROXY` to a URL
+reachable **from the transport container**. Leave chat2api's own `proxy` empty:
+its upstream is now the local transport. A host-only proxy on `127.0.0.1` needs
+an explicit host-network override for both services; then bind both services to
+`127.0.0.1`, and use `http://127.0.0.1:3041` as `chatgpt_base_url`.
 
 ## Register with Lyod Rotator
 
@@ -88,12 +103,13 @@ use existing provider credential merging; Google and Codex credentials remain.
 Set on the rotator process, then restart that process:
 
 ```sh
-LYOD_CHATGPT_APP_MODELS=gpt-5-5-instant,gpt-5-5-thinking
+LYOD_CHATGPT_APP_MODELS=gpt-5-6-mini
 ```
 
-These example slugs come from the pinned sidecar source, not a verified account
-catalog. Choose only slugs confirmed available on your account. No models are
-enabled by default. Public IDs become `chatgpt-app-gpt-5-5-instant`, etc.; the
+This example slug was returned by the real test account's `/backend-api/models`
+and used in a successful smoke request. Other accounts may differ. Choose only
+slugs confirmed available on your account. No models are enabled by default.
+Public IDs become `chatgpt-app-gpt-5-6-mini`, etc.; the
 prefix is stripped only at the sidecar boundary. Unknown/unconfigured IDs fail
 instead of falling back to Gemini, Codex or `auto`.
 
@@ -112,14 +128,37 @@ They do not prove ChatGPT session acceptance, actual model identity, quality,
 multimodal support or limits. A real account smoke test is required before
 production rollout. Claude App is a subsequent integration, not available here.
 
+Run the transport's isolated tests in an environment with its requirements:
+
+```sh
+python -m unittest discover -s test -p chatgpt_app_transport_test.py -v
+```
+
 ### Local live smoke test, 2026-10-20
 
 The pinned image built successfully on the PC (Docker Buildx is required).
-Startup, API key rejection and loading one web account passed. A short request
-through the rotator adapter returned 502: chat2api received an upstream 403 HTML
-response at `sentinel prepare`, before model generation. Repeating through the
-existing PC proxy produced the same refusal. The imported JWT was not expired;
-the exact reason for the upstream refusal remains unverified. Real generation,
-streaming and tool use have therefore **not passed** live validation. The test
-sidecar was stopped; production configuration and the model allowlist were left
-unchanged. Resolve the upstream transport refusal before rollout.
+Its original transport received upstream 403 HTML at `sentinel prepare`, through
+both tested routes. It advertises Chrome 148 but uses a Chrome 124 TLS profile;
+the exact cause of the refusal was not independently established.
+
+Using curl_cffi on the same PC proxy, the saved **free account** token received
+200 from `/backend-api/models`. The former example `gpt-5-5-instant` was absent
+from this real catalog. A diagnostic relay then passed all observed sentinel
+and conversation steps with 200; `gpt-5-6-mini` returned `APP_OK` in 15.5 seconds.
+This proves a working authenticated request path, not independently verified
+internal model execution or paid-model entitlement. Production was not changed.
+
+The packaged transport image then passed live requests through Lyod's real
+`chatGptAppAdapter` with the same free account and explicit model slug:
+
+- SSE: HTTP 200, first chunk 12.278 s, completion 15.740 s, `APP_STREAM_OK`,
+  two received chunks and terminal `[DONE]`.
+- Function call: HTTP 200 in 24.047 s, `add_numbers` with `{"a":2,"b":3}`.
+- Tool-result continuation: HTTP 200, supplied result `5`, expected
+  `APP_TOOL_OK_5` received.
+
+These are short local smoke tests, not a reliability or performance benchmark.
+An initial request raced transport startup; Compose now waits for the transport
+TCP healthcheck before starting chat2api. Seven isolated transport tests and
+13 existing ChatGPT App adapter tests passed. Both local listeners are bound
+to loopback; production configuration/model allowlists were left unchanged.

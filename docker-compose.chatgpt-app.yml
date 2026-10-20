@@ -1,7 +1,28 @@
 # Standalone optional sidecar. Build on the PC, then transfer the image to the host.
 # Use one instance/port/config directory per account; do not pool accounts here.
 services:
+  chatgpt-app-transport:
+    image: lyod-chatgpt-transport:curl-0.16.3
+    build:
+      context: .
+      dockerfile: scripts/chatgpt-app-transport/Dockerfile
+    volumes:
+      - ${LYOD_CHATGPT_APP_CONFIG_DIR:?Set private chat2api config directory}:/app/conf:ro
+    environment:
+      CHATGPT_TRANSPORT_PROXY: ${LYOD_CHATGPT_APP_TRANSPORT_PROXY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 3041), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "none"
   chatgpt-app:
+    depends_on:
+      chatgpt-app-transport:
+        condition: service_healthy
     image: lyod-chat2api:dbf6bf396863
     build:
       context: https://github.com/aurorax-neo/chat2api.git#dbf6bf39686348449c25de3b6131ca733f448deb
