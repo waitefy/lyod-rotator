@@ -7,8 +7,9 @@ Claude Code and ChatGPT App. This first integration uses
 
 The Linux x86_64 release ZIP is pinned to SHA-256:
 `ecad65308f055540ae2e9c1afdae8c192b01946fda2c4e2bc6b3a645c30262fd`.
-The installer verifies the archive before replacing the executable. It does not
-build or modify the upstream project.
+The installer verifies the archive and preserves that stock executable. The local
+service uses a separately built `clewdr-lyod` binary with the tracked patch in
+`scripts/claude-app/clewdr-retry-after.patch`; automatic upstream updates are disabled.
 
 ## Free account and model identity
 
@@ -31,9 +32,13 @@ The catalog deliberately reports unknown context and unverified availability.
 ## Local installation and sign-in
 
 Prerequisites: Linux x86_64, Python with venv, Firefox, a user systemd session,
-Node.js and the rotator dependencies. Run as the desktop user:
+Node.js, the rotator dependencies and the Rust/C/CMake build toolchain. Build
+the pinned source once, then install the login helper as the desktop user:
 
 ```sh
+git clone https://github.com/Xerxes-2/clewdr /path/to/clewdr
+git -C /path/to/clewdr checkout ced44ece9cef0686262855479362072105ef9d8e
+python3 scripts/claude-app/build-bridge.py --source /path/to/clewdr
 python3 scripts/claude-app/install-login.py --origin https://rotator.lyod.online
 rotator-claude-login
 ```
@@ -61,7 +66,10 @@ Each account gets its own loopback listener (3140–3239), bridge password, priv
 TOML and user service. Ports reserved by stopped accounts are not reassigned.
 If bridge startup or readiness fails, the previous connection files are restored.
 The helper uses one cookie per process and disables internal request retries;
-rotator rotation on HTTP 429 remains within Claude App.
+rotator rotation on HTTP 429 remains within Claude App. A private loopback relay
+uses `curl_cffi` with the Firefox 147 fingerprint for outgoing HTTPS. It accepts
+only Claude API paths authenticated with this account's session cookie, forwards
+stream chunks without buffering, and sends no request URLs or headers to logs.
 
 Private files live under `~/.config/lyod-rotator/claude-app/` with 0600 permissions.
 The bridge writes neither response debug files nor stdout/stderr logs. Its web
@@ -111,8 +119,11 @@ bridge listener or reuse the website session as a public API credential.
 - Attachments/vision, structured output, thinking effort selection and audio are explicitly rejected in this
   first integration. Image upload in the underlying project is insufficient
   evidence of working end-to-end support.
-- Header deadline is 600 seconds; no short idle timeout or sidecar retry loop has
-  been introduced. Actual latency and free-tier quotas require a live check.
+- Header deadline is 600 seconds. Only pre-stream HTTP 429 with an explicit
+  numeric Retry-After of at most 10 seconds is retried, at most twice with bounded
+  backoff. Started answers, unknown reset times and longer quota windows are
+  never replayed. The backend preserves explicit reset timestamps and Retry-After
+  instead of assigning a synthetic hour to Retry-After: 0.
 - Errors preserve status/Retry-After but redact arbitrary upstream bodies.
   Authentication errors affect Claude App credentials only; other providers on
   the same account remain intact.
@@ -126,10 +137,10 @@ bridge listener or reuse the website session as a public API credential.
 ## Targeted checks
 
 ```sh
-node --import tsx/esm --test test/claude-app.test.ts test/claude-app-tools.test.ts test/claude-app-wire.test.ts test/chatgpt-app.test.ts
-python3 -m unittest discover -s test -p 'claude_app_browser_test.py' -v
+node --import tsx/esm --test test/claude-app.test.ts test/claude-app-tools.test.ts test/claude-app-wire.test.ts test/claude-app-request.test.ts
+python3 -m unittest discover -s test -p 'claude_app*test.py' -v
 npm run typecheck
-python3 -m py_compile src/providers/claude-app/browser_login.py scripts/claude-app/install-login.py
+python3 -m py_compile src/providers/claude-app/browser_login.py src/providers/claude-app/transport.py scripts/claude-app/install-login.py scripts/claude-app/build-bridge.py
 ```
 
 The browser test requires `curl_cffi` in its interpreter; use the login venv if
@@ -137,23 +148,40 @@ it is not installed globally. All automated tests above use local fixtures, not
 real account quotas. They do not prove successful website authentication or
 which backend model served a live request.
 
-## Initial live check
+## Live validation
 
-The first free-account control request returned the requested `CLAUDE_OK` text;
-the first text arrived in approximately 5.2 seconds. This exposed the OpenAI SSE
-completion issue described above. A subsequent request using native Messages
-encountered an exhausted sidecar account, rather than verifying the new live
-completion path. The corrected error mapping returned 429 in 32 ms without a
-new generation. The bridge supplied a reset timestamp, but it does not preserve
-enough detail to distinguish a quota response from every other temporary
-restriction.
+A free-account control completed a real tool roundtrip through the persistent
+local systemd service and the Claude App adapter: the model requested a declared
+file-reading tool, the client read a temporary control file, and the next model
+turn returned its exact contents. Both SSE responses reached `[DONE]`. The two
+latest turns took 5.483 and 4.152 seconds, without a buffering diagnostic wrapper.
+Earlier successful roundtrips took 4.100/3.786 and 9.609/7.613 seconds.
+A separate plain-text stream returned the exact control text, with its first
+fragment at 5.589 seconds and EOF at 5.932 seconds (two text deltas).
+Additional repetitions exposed an HTTP 403 on some attempts and a completed
+response that did not follow the exact-output instruction. These are not counted
+as passing exact-output controls. The final successful cycle used the persistent
+service without a restart between its tool and answer turns.
+This verifies local text/tool connectivity, not a named backend model or production
+deployment, sustained throughput, long-context reliability or attachments.
 
-A subsequent direct website probe accepted a short temporary-chat request
-(HTTP 200 with a completion event) while the bridge still considered the account
-exhausted. After restarting only the local sidecar to clear that stale in-memory
-state, the native Messages path returned exactly `CLAUDE_OK`, with its first text
-at 4.632 seconds and `[DONE]` at 4.971 seconds. The following tool control request
-again caused the bridge to park the account; tool execution remains unverified.
-The previous cached admin snapshot initially masked this new state, so failure
-diagnosis now requests `/api/cookies?refresh=true`. No repeated automatic reset
-or retry loop is enabled, and the initial upstream refusal remains undetermined.
+The investigation captured an upstream `429 rate_limit_error` with `Retry-After: 0`
+and no quota-reset header. Stock ClewdR assigned an invented one-hour window to
+that response. The tracked patch preserves explicit backoff and returns 429 rather
+than masking the last attempt as 504. A direct two-request comparison also observed
+`200 → 429` with reused HTTP state and `200 → 200` with a fresh context for the
+second request. The relay therefore starts a fresh Firefox HTTP context at each
+new bootstrap, keeping the same account cookie and preserving state inside a turn.
+Access is serialized per account; one curl handle is shared across the relay request threads.
+Only generation responses use streaming; bootstrap and settings requests finish
+before the next request starts.
+This is an observed transport dependency; the website's internal reason is unknown.
+An initial bootstrap HTML 403 gets at most one retry with a fresh HTTP context,
+before a chat is created. JSON authorization failures and generation responses
+are excluded from this retry.
+
+The relay moves ClewdR's synthetic `paste.txt` transcript into the main prompt,
+so tool instructions and the latest user/tool messages are actually present in the
+request text. The adapter drains the native stream through EOF after `message_stop`
+before allowing the next turn. Real authorization failures and free-tier quota
+windows can still stop requests; no claim of unlimited access is made.

@@ -35,3 +35,29 @@ it("rejects EOF without a native message_stop and redacts native error events", 
     await assert.rejects(result.text(), (error: Error) => /invalid or interrupted/.test(error.message) && !error.message.includes("private-credential"));
   }
 });
+
+it("drains the native stream through EOF before allowing the next tool turn", async () => {
+  let upstream!: ReadableStreamDefaultController<Uint8Array>;
+  let cancelled = false;
+  const encoder = new TextEncoder();
+  const raw = new ReadableStream<Uint8Array>({
+    start(controller) {
+      upstream = controller;
+      controller.enqueue(encoder.encode(sse({ type: "content_block_delta", delta: { type: "text_delta", text: "hello" } }) + sse({ type: "message_stop" })));
+    },
+    cancel() { cancelled = true; },
+  });
+  const result = await fromBridgeResponse(new Response(raw), "auto", true);
+  const reader = result.body!.getReader();
+  assert.match(new TextDecoder().decode((await reader.read()).value), /hello/);
+  let finished = false;
+  const completion = reader.read().then((value) => { finished = true; return value; });
+  await new Promise<void>((accept) => setImmediate(accept));
+  assert.equal(finished, false);
+  assert.equal(cancelled, false);
+  upstream.close();
+  assert.match(new TextDecoder().decode((await completion).value), /finish_reason/);
+  assert.match(new TextDecoder().decode((await reader.read()).value), /\[DONE\]/);
+  assert.equal((await reader.read()).done, true);
+  assert.equal(cancelled, false);
+});

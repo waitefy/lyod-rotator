@@ -1,0 +1,84 @@
+diff --git a/src/claude_web_state/chat.rs b/src/claude_web_state/chat.rs
+index 6a05795..db29653 100644
+--- a/src/claude_web_state/chat.rs
++++ b/src/claude_web_state/chat.rs
+@@ -66,6 +66,9 @@ impl ClaudeWebState {
+                     // 429 error
+                     if let ClewdrError::InvalidCookie { reason } = e {
+                         state.return_cookie(Some(reason.clone()));
++                        if i == CLEWDR_CONFIG.load().max_retries {
++                            return Err(ClewdrError::InvalidCookie { reason });
++                        }
+                         continue;
+                     }
+                     return Err(e);
+diff --git a/src/error.rs b/src/error.rs
+index ca6c85a..bb0405f 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -191,6 +191,14 @@ impl IntoResponse for ClewdrError {
+             ClewdrError::JsonRejection { ref source } => {
+                 (source.status(), json!(source.body_text()))
+             }
++            ClewdrError::InvalidCookie { reason: Reason::TooManyRequest(reset) } => {
++                let retry = reset.saturating_sub(Utc::now().timestamp()).max(1).to_string();
++                return (
++                    StatusCode::TOO_MANY_REQUESTS,
++                    [("retry-after", retry)],
++                    Json(json!({"error": {"type": "rate_limit_error", "message": "Claude temporarily rate limited this account"}})),
++                ).into_response();
++            }
+             ClewdrError::TooManyRetries => (StatusCode::GATEWAY_TIMEOUT, json!(self.to_string())),
+             ClewdrError::PathNotFound { .. } => (StatusCode::NOT_FOUND, json!(self.to_string())),
+             ClewdrError::InvalidAuth => (StatusCode::UNAUTHORIZED, json!(self.to_string())),
+@@ -292,6 +300,7 @@ impl CheckClaudeErr for Response {
+         if status.is_success() {
+             return Ok(self);
+         }
++        let retry_after = self.headers().get("retry-after").cloned();
+         let reset_header = self
+             .headers()
+             .get("anthropic-ratelimit-unified-reset")
+@@ -357,7 +366,8 @@ impl CheckClaudeErr for Response {
+             // get the reset time from the error message
+             let ts = inner_error.message["resetsAt"]
+                 .as_i64()
+-                .or_else(|| reset_header.and_then(|h| h.to_str().ok()?.parse::<i64>().ok()));
++                .or_else(|| reset_header.and_then(|h| h.to_str().ok()?.parse::<i64>().ok()))
++                .or_else(|| retry_after_reset(retry_after.as_ref(), Utc::now().timestamp()));
+             if let Some(ts) = ts {
+                 let reset_time = chrono::DateTime::from_timestamp(ts, 0)
+                     .ok_or(ClewdrError::TimestampError { timestamp: ts })?
+@@ -381,3 +391,32 @@ impl CheckClaudeErr for Response {
+         })
+     }
+ }
++
++// A transient 429 may explicitly permit an immediate retry. Do not turn it into
++// an invented one-hour quota window; retain a one-second minimum backoff.
++fn retry_after_reset(header: Option<&wreq::header::HeaderValue>, now: i64) -> Option<i64> {
++    let seconds = header?.to_str().ok()?.trim().parse::<u64>().ok()?;
++    now.checked_add(i64::try_from(seconds.max(1)).ok()?)
++}
++
++#[cfg(test)]
++mod lyod_rate_limit_tests {
++    use super::retry_after_reset;
++    use wreq::header::HeaderValue;
++
++    #[test]
++    fn honors_explicit_retry_after_without_inventing_an_hour() {
++        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("0")), 100), Some(101));
++        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("17")), 100), Some(117));
++        let response = super::ClewdrError::InvalidCookie {
++            reason: crate::config::Reason::TooManyRequest(chrono::Utc::now().timestamp() + 17),
++        };
++        let response = axum::response::IntoResponse::into_response(response);
++        assert_eq!(response.status(), wreq::StatusCode::TOO_MANY_REQUESTS);
++        assert!(response.headers().contains_key("retry-after"));
++        assert_eq!(retry_after_reset(None, 100), None);
++        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("invalid")), 100), None);
++        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("-1")), 100), None);
++        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("18446744073709551615")), 100), None);
++    }
++}

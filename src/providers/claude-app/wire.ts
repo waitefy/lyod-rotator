@@ -46,6 +46,8 @@ export async function fromBridgeResponse(response: Response, model: string, stre
           }
           if (boundary < 0 && eof && !input) {
             if (!stopped) throw new Error();
+            controller.enqueue(event({}, reason));
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close(); reader.releaseLock(); return;
           }
           if (boundary < 0 && !eof) continue;
@@ -58,10 +60,12 @@ export async function fromBridgeResponse(response: Response, model: string, stre
           if (data.type === "message_delta" && data.delta?.stop_reason) reason = finishReason(data.delta.stop_reason);
           if (data.type === "message_stop") {
             stopped = true;
-            controller.enqueue(event({}, reason));
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-            await reader.cancel(); reader.releaseLock(); controller.close(); return;
+            // ClewdR finalizes the upstream request and returns usage at EOF.
+            // Cancelling on message_stop can leave the website generation in flight
+            // while the client starts its next tool turn.
+            continue;
           }
+          if (stopped) continue;
           if (data.type === "content_block_delta" && data.delta?.type === "text_delta") {
             controller.enqueue(event({ content: data.delta.text })); return;
           }

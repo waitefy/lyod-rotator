@@ -50,6 +50,8 @@ class ClaudeLoginTest(unittest.TestCase):
         self.assertEqual(data["rproxy"], "https://claude.ai/")
         self.assertEqual(data["max_retries"], 0)
         self.assertFalse(data["skip_non_pro"])
+        self.assertFalse(data["use_real_roles"])
+        self.assertNotIn("custom_prompt", data)
         self.assertEqual(data["cookie_array"], [{"cookie": 'cookie"\\fixture'}])
 
     def test_cookie_extraction_excludes_other_sites_containers_and_expired_entries(self):
@@ -110,6 +112,17 @@ class ClaudeLoginTest(unittest.TestCase):
         _, second = login.allocate(self.root, "two@example.com")
         self.assertNotEqual(first["baseUrl"], second["baseUrl"])
         self.assertNotEqual(first["apiKey"], second["apiKey"])
+
+    def test_service_runs_private_transport_with_current_interpreter(self):
+        directory = self.root / "accounts" / "fixture-account"
+        with patch.object(login.Path, "home", return_value=self.root), patch.object(login.subprocess, "run"):
+            service = login.start_bridge(directory)
+        text = (self.root / ".config/systemd/user" / service).read_text()
+        self.assertIn(f'ExecStart="{login.sys.executable}"', text)
+        self.assertIn('transport.py" --binary "', text)
+        self.assertIn(str(login.BINARY), text)
+        self.assertIn("StandardError=null", text)
+        self.assertNotIn("sessionKey", text)
 
 
 if __name__ == "__main__":

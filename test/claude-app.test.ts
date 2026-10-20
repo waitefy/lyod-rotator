@@ -60,7 +60,7 @@ before(async () => {
       leakedHeader: req.headers["x-client-secret"] as string | undefined, body });
     const content = JSON.stringify([body.messages, body.system]);
     if (content.includes("quota-rotation") && req.headers.authorization === "Bearer bridge-private-key") {
-      res.writeHead(429, { "retry-after": "1" }); res.end("quota limit"); return;
+      res.writeHead(429, { "retry-after": "600" }); res.end("quota limit"); return;
     }
     const error = content.match(/reject-(\d+)/);
     if (error) {

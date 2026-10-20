@@ -21,7 +21,8 @@ _spec = importlib.util.spec_from_file_location("claude_login_ui", Path(__file__)
 ui = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ui)
 ROOT = Path("~/.config/lyod-rotator/claude-app").expanduser()
-BINARY = Path("~/.local/share/lyod-rotator/claude-app/clewdr-v0.13.5/clewdr").expanduser()
+RELEASE_BINARY = Path("~/.local/share/lyod-rotator/claude-app/clewdr-v0.13.5/clewdr").expanduser()
+BINARY = RELEASE_BINARY.parent / "clewdr-lyod"
 ui.SCHEME = "lyod-claude"
 ui.PAGE = ui.PAGE.replace("ChatGPT", "Claude")
 LoginError = ui.LoginError
@@ -95,7 +96,8 @@ def config_text(connection, cookie, proxy=None):
                   password=connection["apiKey"], admin_password=connection["adminApiKey"],
                   rproxy="https://claude.ai/", no_fs=True, log_to_file=False,
                   check_update=False, auto_update=False, max_retries=0,
-                  preserve_chats=False, web_search=False, skip_non_pro=connection["modelSelection"] == "explicit")
+                  preserve_chats=False, web_search=False, use_real_roles=False,
+                  skip_non_pro=connection["modelSelection"] == "explicit")
     if proxy:
         values["proxy"] = proxy
     return "\n".join(key + " = " + json.dumps(value) for key, value in values.items()) + "\n\n[[cookie_array]]\ncookie = " + json.dumps(cookie) + "\n"
@@ -119,7 +121,7 @@ def start_bridge(directory):
     units.mkdir(parents=True, exist_ok=True)
     # Logs are disabled: the upstream prints a cookie prefix and its static model catalog is not proof of access.
     text = ("[Unit]\nDescription=Claude App local bridge\nAfter=network-online.target\n\n[Service]\nType=simple\n"
-            f'ExecStart="{BINARY}" --config "{directory / "clewdr.toml"}"\n'
+            f'ExecStart="{sys.executable}" "{Path(__file__).with_name("transport.py")}" --binary "{BINARY}" --config "{directory / "clewdr.toml"}"\n'
             "Restart=on-failure\nRestartSec=5\nStandardOutput=null\nStandardError=null\nUMask=0077\n\n[Install]\nWantedBy=default.target\n")
     write_text_private(units / service, text)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True, timeout=15)
@@ -151,7 +153,7 @@ def allocate(root, email):
 def connect(settings, expected=None, progress=lambda text: None):
     root = Path(settings["configDir"])
     if not BINARY.is_file():
-        raise LoginError("Не установлен закреплённый бинарник ClewdR 0.13.5.")
+        raise LoginError("Не установлен ClewdR с исправлением Retry-After: запустите scripts/claude-app/build-bridge.py.")
     with (root / "login.lock").open("a") as lock:
         os.chmod(lock.name, 0o600)
         try:

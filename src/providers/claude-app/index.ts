@@ -4,7 +4,7 @@ import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 import type { ProviderAdapter } from "../adapter.js";
 import type { AccountConfig } from "../../types.js";
-import { fetchWithHeadersTimeout } from "../../fetch-with-retry.js";
+import { fetchClaudeMessage } from "./request.js";
 import { OpenCodeZenSseAccumulator } from "../opencode-zen/forward.js";
 import { accountFromSessionFile, CLAUDE_APP_PROVIDER, claudeAppModels, getSessionFile,
   isClaudeAppModel, readBridgeSession, upstreamModel } from "./credentials.js";
@@ -95,7 +95,7 @@ export const claudeAppAdapter: ProviderAdapter = {
     }
     const endpoint = `${session.baseUrl}/messages`;
     try {
-      const response = await fetchWithHeadersTimeout(endpoint, {
+      const response = await fetchClaudeMessage(endpoint, {
         method: "POST", redirect: "error", signal, timeoutMs: 600_000,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.apiKey}`,
           Accept: request.stream === true ? "text/event-stream" : "application/json" },

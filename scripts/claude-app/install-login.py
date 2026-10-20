@@ -38,7 +38,9 @@ def main():
         url = urlsplit(args.proxy)
         if url.scheme not in ("http", "https", "socks5", "socks5h") or not url.hostname or url.username or url.password or url.query or url.fragment:
             parser.error("Use a proxy URL without embedded credentials")
-    target = login.BINARY
+    if not login.BINARY.is_file():
+        parser.error("First run scripts/claude-app/build-bridge.py --source /path/to/clewdr-v0.13.5")
+    target = login.RELEASE_BINARY
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with urllib.request.urlopen(URL, timeout=120) as response:
         archive = response.read(100 * 1024 * 1024)
