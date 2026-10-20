@@ -1,0 +1,354 @@
+"""User-initiated Firefox sign-in for a preconfigured, single-account local bridge."""
+import argparse
+from contextlib import closing
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+ROOT = Path("~/.config/lyod-rotator/chatgpt-app").expanduser()
+SCHEME = "lyod-chatgpt"
+DESKTOP_ID = "lyod-chatgpt-login.desktop"
+
+
+class LoginError(ValueError):
+    """An actionable message containing no upstream response or credentials."""
+
+
+def email_value(value):
+    if not isinstance(value, str) or len(value) > 254 or not re.fullmatch(
+            r"[^\s@<>\x00-\x1f]+@[^\s@<>\x00-\x1f]+\.[^\s@<>\x00-\x1f]+", value):
+        raise LoginError("Не удалось определить аккаунт ChatGPT.")
+    return value.casefold()
+
+
+def origin(value):
+    p = urlsplit(value)
+    if (p.username or p.password or p.path not in ("", "/") or p.query or p.fragment
+            or not p.hostname or not (p.scheme == "https" or
+            p.scheme == "http" and p.hostname in ("127.0.0.1", "localhost", "::1"))):
+        raise LoginError("Нужен HTTPS-адрес ротатора или локальный HTTP-адрес.")
+    return p.scheme + "://" + p.netloc.lower()
+
+
+def parse_link(value, trusted_origin):
+    if len(value) > 2048:
+        raise LoginError("Некорректная ссылка входа.")
+    p = urlsplit(value)
+    if p.scheme != SCHEME or p.netloc != "login" or p.path not in ("", "/") or p.fragment:
+        raise LoginError("Некорректная ссылка входа.")
+    fields = parse_qs(p.query, keep_blank_values=True, strict_parsing=True)
+    if set(fields) - {"origin", "account"} or any(len(v) != 1 for v in fields.values()):
+        raise LoginError("Некорректные параметры входа.")
+    if origin(fields.get("origin", [""])[0]) != origin(trusted_origin):
+        raise LoginError("Этот сайт не совпадает с настроенным ротатором.")
+    return email_value(fields["account"][0]) if fields.get("account", [""])[0] else None
+
+
+def save_private(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".chatgpt-login-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def read_private(path):
+    path = Path(path)
+    with path.open() as stream:
+        stat = os.fstat(stream.fileno())
+        if stat.st_mode & 0o077 or stat.st_size > 1_000_000:
+            raise LoginError("Файл настройки должен быть приватным (0600).")
+        return json.load(stream)
+
+
+def read_cookies(profile):
+    database = Path(profile) / "cookies.sqlite"
+    if not database.is_file():
+        raise LoginError("Вход не сохранён. Войдите в ChatGPT и закройте отдельное окно Firefox.")
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        rows = connection.execute("""SELECT host, path, name, value FROM moz_cookies
+            WHERE host IN ('chatgpt.com', '.chatgpt.com') AND originAttributes = ''
+            AND (expiry = 0 OR expiry > ?) AND isSecure = 1""", (int(time.time()),)).fetchall()
+    if not any("session-token" in row[2] for row in rows):
+        raise LoginError("Сессия ChatGPT не найдена. Завершите вход в отдельном окне Firefox.")
+    return rows
+
+
+def fetch_session(cookies, proxy=None):
+    # The browser's saved cookies are sent only to ChatGPT, never to the rotator.
+    from curl_cffi import requests
+    try:
+        with requests.Session(impersonate="firefox", proxy=proxy, trust_env=False) as client:
+            for host, path, name, value in cookies:
+                client.cookies.set(name, value, domain=host, path=path)
+            response = client.get("https://chatgpt.com/api/auth/session", timeout=45, allow_redirects=False)
+            if response.status_code != 200:
+                raise LoginError("ChatGPT не подтвердил вход. Откройте сохранённый профиль и пройдите проверку сайта.")
+            data = response.json()
+            email = email_value(data.get("user", {}).get("email"))
+            token = data.get("accessToken")
+            if not isinstance(token, str) or not token or len(token) > 32000 or not token.isascii() or any(c.isspace() for c in token):
+                raise LoginError("ChatGPT не выдал действующую сессию. Повторите вход.")
+            response = client.get("https://chatgpt.com/backend-api/models", headers={"Authorization": "Bearer " + token},
+                                  timeout=45, allow_redirects=False)
+            if response.status_code != 200 or not isinstance(response.json().get("models"), list):
+                raise LoginError("Вход сохранён браузером, но доступ к ChatGPT пока не подтверждён. Повторите позже.")
+            return {"email": email, "accessToken": token}
+    except LoginError:
+        raise
+    except Exception:
+        raise LoginError("Не удалось проверить сессию ChatGPT. Профиль сохранён; попробуйте снова.") from None
+
+
+def firefox_login(profile):
+    executable = shutil.which("firefox")
+    if not executable:
+        raise LoginError("Для входа нужен Firefox на этом компьютере.")
+    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+    profile.chmod(0o700)
+    (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\n'
+                                   'user_pref("browser.aboutwelcome.enabled", false);\n')
+    process = subprocess.Popen([executable, "--new-instance", "--profile", str(profile), "https://chatgpt.com/"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if process.wait(timeout=1800) != 0:
+            raise LoginError("Закройте уже открытое окно профиля ChatGPT и повторите вход.")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def restart_bridge(settings):
+    # Commands come only from the locally installed private settings, never a URL.
+    command = ["docker", "compose", "--project-name", settings["project"]]
+    for file in settings["composeFiles"]:
+        command.extend(["-f", file])
+    environment = dict(os.environ, LYOD_CHATGPT_APP_CONFIG_DIR=settings["configDir"])
+    environment["LYOD_CHATGPT_APP_TRANSPORT_PROXY"] = settings.get("proxy", "")
+    subprocess.run(command + ["up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "45",
+                              "chatgpt-app-transport", "chatgpt-app"],
+                   env=environment, check=True, timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def check_bridge(bridge):
+    """Readiness only; account access was checked directly before saving."""
+    from curl_cffi import requests
+    address = urlsplit(bridge["baseUrl"])
+    if (address.username or address.password or address.query or address.fragment
+            or not (address.scheme == "https" or address.scheme == "http" and
+                    address.hostname in ("localhost", "127.0.0.1", "::1"))):
+        raise LoginError("Некорректный адрес локального моста.")
+    with requests.Session(trust_env=False) as client:
+        for attempt in range(10):
+            try:
+                response = client.get(bridge["baseUrl"].rstrip("/") + "/models",
+                                      headers={"Authorization": "Bearer " + bridge["apiKey"]},
+                                      timeout=2, allow_redirects=False)
+                if response.status_code == 200 and isinstance(response.json().get("data"), list):
+                    return
+            except Exception:
+                pass
+            if attempt < 9:
+                time.sleep(1)
+    raise LoginError("Локальный мост не подтвердил готовность после обновления.")
+
+
+def connect(settings, expected=None, progress=lambda text: None):
+    root = Path(settings["configDir"])
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (root / "browser-login.lock").open("a") as lock:
+        os.chmod(lock.name, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LoginError("Вход уже открыт. Завершите его в отдельном окне Firefox.") from None
+        config_file, session_file = root / "app.prod.yaml", root / "session.json"
+        import yaml
+        if config_file.stat().st_mode & 0o077:
+            raise LoginError("Настройка моста должна быть приватной (0600).")
+        original = yaml.safe_load(config_file.read_text())
+        bridge = read_private(session_file)
+        accounts = original.get("chatgpts", [])
+        if len(accounts) != 1 or email_value(accounts[0].get("email")) != email_value(bridge.get("email")):
+            raise LoginError("Нужен отдельный настроенный мост для одного аккаунта ChatGPT.")
+        account = email_value(bridge["email"])
+        if expected and expected != account:
+            raise LoginError("Этот локальный мост настроен для другого аккаунта. Его сессия не изменена.")
+        profile = root / "firefox-profiles" / hashlib.sha256(account.encode()).hexdigest()[:24]
+        progress("Войдите в ChatGPT и закройте отдельное окно Firefox. Эта страница обновится автоматически.")
+        firefox_login(profile)
+        progress("Проверяем вход в ChatGPT…")
+        session = fetch_session(read_cookies(profile), settings.get("proxy") or None)
+        if session["email"] != account:
+            raise LoginError("Вы вошли в другой аккаунт. Прежнее подключение не изменено; повторите вход в нужный аккаунт.")
+        if yaml.safe_load(config_file.read_text()) != original or read_private(session_file) != bridge:
+            raise LoginError("Настройка моста изменилась во время входа. Повторите подключение; новые настройки сохранены.")
+        updated = dict(original, chatgpts=[dict(accounts[0], access_token=session["accessToken"])])
+        progress("Сохраняем подключение…")
+        save_private(config_file, updated)
+        try:
+            restart_bridge(settings)
+            check_bridge(bridge)
+        except Exception:
+            save_private(config_file, original)
+            try:
+                restart_bridge(settings)
+            except Exception:
+                raise LoginError("Мост не запустился. Прежняя сессия восстановлена в файле, но мост нужно запустить вручную.") from None
+            raise LoginError("Мост не принял обновление. Прежнее подключение восстановлено; повторите позже.") from None
+        # Only safe diagnostic fields are retained, never the raw session response.
+        save_private(root / "login-status.json", {"ok": True, "email": account, "checkedAt": int(time.time())})
+        return account
+
+
+PAGE = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>ChatGPT App — Lyod Rotator</title><style>
+body{margin:0;background:#f2ede4;color:#202b22;font:17px/1.6 system-ui;display:grid;place-items:center;min-height:100vh}
+main{background:#fffdf9;border:1px solid #deded5;border-radius:24px;padding:36px;max-width:600px;margin:24px}
+h1{line-height:1.15}#status{padding:18px;background:#eef4ee;border-radius:14px}small{color:#566457}
+</style><main><small>LYOD ROTATOR · CHATGPT APP</small><h1>Вход через Firefox</h1>
+<p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. Сохранённый профиль будет использован при следующем подключении.</p>
+<p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Обновляется только локальный мост на этом ПК.</small>
+<script>async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;if(!d.done)setTimeout(poll,1000)}catch{document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()</script></main></html>"""
+
+
+def run_login(settings, expected=None, open_page=True):
+    nonce = secrets.token_urlsafe(32)
+    state = {"done": False, "message": "Открываем Firefox…"}
+    finished = threading.Event()
+
+    def progress(text):
+        state.update(message=text)
+        save_private(Path(settings["configDir"]) / "login-progress.json", state)
+
+    class StatusHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            if self.headers.get("Host") != "127.0.0.1:" + str(self.server.server_port):
+                self.send_error(403)
+                return
+            path = self.path
+            if path not in ("/" + nonce + "/", "/" + nonce + "/status"):
+                self.send_error(404)
+                return
+            payload = json.dumps(state).encode() if path.endswith("/status") else PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json" if path.endswith("/status") else "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(payload)
+
+    def worker():
+        try:
+            account = connect(settings, expected, progress)
+            state.update(message="ChatGPT подключён: " + account + ". Локальный мост обновлён. Можно закрыть эту страницу.", ok=True)
+        except Exception as error:
+            state.update(message=str(error) if isinstance(error, LoginError) else
+                         "Не удалось завершить вход. Профиль Firefox сохранён; повторите попытку.", ok=False)
+        finally:
+            state.update(done=True)
+            try:
+                save_private(Path(settings["configDir"]) / "login-progress.json", state)
+            except OSError:
+                pass
+            finally:
+                finished.set()
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), StatusHandler) as server:
+        server.daemon_threads = True
+        server.handle_error = lambda *_: None
+        url = "http://127.0.0.1:" + str(server.server_port) + "/" + nonce + "/"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        if open_page:
+            subprocess.run(["xdg-open", url], timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        threading.Thread(target=worker, daemon=True).start()
+        finished.wait(2000)
+        if open_page:
+            finished.wait()  # Worker has a bounded Firefox and network timeout.
+            time.sleep(120)  # Keep the final result visible; no model request is running.
+        server.shutdown()
+    return 0 if state.get("ok") else 1
+
+
+def desktop_quote(value):
+    return '\"' + str(value).replace("\\", "\\\\").replace('\"', '\\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%") + '\"'
+
+
+def install(settings, root=ROOT, applications=None):
+    settings = dict(settings, origin=origin(settings["origin"]), configDir=str(root.resolve()))
+    read_private(root / "session.json")
+    save_private(root / "browser-login.json", settings)
+    applications = Path(applications or Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "applications")
+    applications.mkdir(parents=True, exist_ok=True)
+    entry = ("[Desktop Entry]\nType=Application\nName=ChatGPT App — Lyod Rotator\nNoDisplay=true\nTerminal=false\n"
+             f"Exec={desktop_quote(sys.executable)} {desktop_quote(Path(__file__).resolve())} --open %u\n"
+             f"MimeType=x-scheme-handler/{SCHEME};\n")
+    (applications / DESKTOP_ID).write_text(entry)
+    subprocess.run(["xdg-mime", "default", DESKTOP_ID, "x-scheme-handler/" + SCHEME], check=True, timeout=15)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--install", action="store_true")
+    mode.add_argument("--open", metavar="URL")
+    mode.add_argument("--login", action="store_true")
+    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--origin", default="https://rotator.lyod.online")
+    parser.add_argument("--project", default="lyod-chatgpt-app")
+    parser.add_argument("--compose-file", action="append", default=[])
+    parser.add_argument("--proxy", default="")
+    args = parser.parse_args()
+    os.umask(0o077)
+    try:
+        if args.install:
+            if not args.compose_file or any(not Path(p).is_file() for p in args.compose_file):
+                raise LoginError("Укажите существующие compose-файлы локального моста.")
+            install({"origin": args.origin, "project": args.project, "composeFiles": [str(Path(p).resolve()) for p in args.compose_file],
+                     "proxy": args.proxy}, args.root)
+            print("Помощник входа ChatGPT App установлен.")
+            return 0
+        settings = read_private(args.root / "browser-login.json")
+        expected = parse_link(args.open, settings["origin"]) if args.open else None
+        return run_login(settings, expected)
+    except Exception as error:
+        text = str(error) if isinstance(error, LoginError) else "Не удалось запустить вход ChatGPT App. Проверьте настройку локального моста."
+        print(text, file=sys.stderr)
+        if shutil.which("notify-send"):
+            subprocess.run(["notify-send", "--", "ChatGPT App", text], timeout=15, check=False)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

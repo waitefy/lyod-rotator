@@ -285,10 +285,12 @@ it("rotates a rate-limited account to another explicit bridge without changing m
   } finally { selectedAccount = account; retryAccount = undefined; }
 });
 
-it("exposes a connection form without pretending browser sign-in is implemented", () => {
+it("offers local browser sign-in and keeps remote bridge registration explicit", () => {
   let html = "";
   serveCliLogin({ writeHead() {}, end(value: string) { html = value; } } as unknown as ServerResponse);
   assert.match(html, /panel-chatgpt-app/);
-  assert.match(html, /Browser sign-in is not implemented/);
+  assert.match(html, /lyod-chatgpt:\/\/login/);
+  assert.match(html, /does not deploy a bridge or connect a remote rotator automatically/);
+  assert.match(html, /Advanced: register an existing bridge/);
   assert.match(html, /fetch\('\/api\/cli-login'/);
 });

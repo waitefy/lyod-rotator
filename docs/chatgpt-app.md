@@ -39,7 +39,7 @@ chatgpts:
 Web access tokens are obtained through the existing signed-in ChatGPT browser
 session and stored locally in the sidecar config. Do not paste them into chat,
 commit them, or reuse Codex OAuth credentials as ChatGPT web credentials.
-An integrated browser login/refresh flow is not implemented in this stage.
+The local Firefox helper below can obtain and replace the token without copying it.
 Keep sidecar configuration, logs and admin endpoints private. Docker logging is
 disabled in the example; upstream may also write files under `/app/logs`.
 
@@ -131,6 +131,59 @@ This environment file configures the rotator, not the chat2api sidecar.
 Public IDs become `chatgpt-app-gpt-6`, `chatgpt-app-gpt-5-6-mini`; the
 prefix is stripped only at the sidecar boundary. Unknown/unconfigured IDs fail
 instead of falling back to Gemini, Codex or `auto`.
+
+## Browser sign-in on the PC
+
+The `/login-cli` → **ChatGPT App** panel offers **Open Firefox** through the
+user-installed `lyod-chatgpt` URL handler. It opens a local progress page and a
+dedicated Firefox profile. Sign in to the account configured for this bridge,
+then close that separate Firefox window. The helper reads only ChatGPT cookies
+from that dedicated profile and requests `/api/auth/session` directly from
+ChatGPT. It checks the authenticated model catalog before saving the token.
+
+Install once, after preparing the single-account sidecar configuration and
+`session.json` above. Use a persistent virtual environment:
+
+```sh
+python3 -m venv "$HOME/.local/share/lyod-rotator/chatgpt-login-venv"
+"$HOME/.local/share/lyod-rotator/chatgpt-login-venv/bin/pip" install -r scripts/chatgpt-app-transport/requirements.txt
+"$HOME/.local/share/lyod-rotator/chatgpt-login-venv/bin/python" src/providers/chatgpt-app/browser_login.py \
+  --install --origin https://rotator.lyod.online \
+  --compose-file "$PWD/docker-compose.chatgpt-app.yml"
+```
+
+For a host-network setup, append another `--compose-file` with the private
+override and `--proxy` with the local outbound proxy. Use `--project` if the
+existing Compose project is not `lyod-chatgpt-app`. These trusted local settings
+are private; links from the website cannot override paths, proxies or commands.
+The helper accepts links only for the origin chosen during installation.
+
+You can also start it directly:
+
+```sh
+"$HOME/.local/share/lyod-rotator/chatgpt-login-venv/bin/python" src/providers/chatgpt-app/browser_login.py --login
+```
+
+After successful verification it atomically replaces the sidecar token and
+recreates only the two ChatGPT App containers, using existing images. If startup
+or readiness fails, it restores the previous configuration and attempts to
+restart the old bridge. Wrong-account sign-in never replaces the existing token.
+Cookies, access tokens and full upstream responses are not shown on the status
+page or retained in its diagnostic JSON. The Firefox profile persists across
+restarts; token renewal requires running the helper again, not signing in anew
+when the browser session remains valid.
+
+This first browser flow renews an **existing, single-account local bridge**.
+It does not provision additional sidecars, deploy to production, register accounts
+on a remote rotator or expose the PC bridge to the server. Existing server
+registration stays under **Advanced** in the panel. A local success message
+therefore describes the PC bridge, not production connectivity.
+
+Test without opening Firefox or using a real account:
+
+```sh
+"$HOME/.local/share/lyod-rotator/chatgpt-login-venv/bin/python" -m unittest discover -s test -p chatgpt_app_browser_test.py -v
+```
 
 The sidecar's `/v1/models` list is static; it cannot prove account entitlement.
 Context size and usage quotas are unknown. The adapter does not invent a quota

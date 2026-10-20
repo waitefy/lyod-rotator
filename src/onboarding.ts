@@ -473,9 +473,24 @@ ${geminiWebLoginPanel(account)}
 </div>
 
 <div class="panel" id="panel-chatgpt-app">
-<h3>Connect ChatGPT App bridge</h3>
-<p>Connect an existing chat2api sidecar configured for exactly one account.
-This is separate from OpenAI Codex. Browser sign-in is not implemented here yet.</p>
+<h3>Sign in to ChatGPT App</h3>
+<p>Open the local login helper, sign in to ChatGPT in its separate Firefox window,
+then close that window. The helper checks your account and saves the connection automatically.</p>
+<a class="cta" id="chatgpt-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
+<div class="note">Requires the ChatGPT App login helper and a configured single-account bridge on this PC.
+This updates the local bridge; it does not deploy a bridge or connect a remote rotator automatically.
+ChatGPT App sign-in is separate from OpenAI Codex.</div>
+<script>
+(() => {
+  const button = document.getElementById('chatgpt-connect');
+  const link = new URL('lyod-chatgpt://login');
+  link.searchParams.set('origin', location.origin);
+  if (button.dataset.account) link.searchParams.set('account', button.dataset.account);
+  button.href = link.href;
+})();
+</script>
+<details style="margin-top:24px"><summary>Advanced: register an existing bridge with this rotator</summary>
 <p>Create a private (0600) JSON on the rotator host with email, baseUrl and the sidecar's local apiKey.
 Enter its absolute path below. Web access tokens stay in the sidecar.</p>
 <form id="chatgptAppForm">
@@ -501,6 +516,7 @@ document.getElementById('chatgptAppForm').addEventListener('submit', async (even
   finally { button.disabled = false; }
 });
 </script>
+</details>
 </div>
 
 <div class="panel" id="panel-codex">
