@@ -71,10 +71,12 @@ export async function translateResponse(response: Response, bridge: ToolBridge |
   const event = (delta: unknown, finish_reason: string | null = null) => encoder.encode(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
   return new Response(new ReadableStream<Uint8Array>({
     async pull(controller) {
+      let stage = "upstream_read";
       try {
         while (true) {
           let boundary = input.indexOf("\n");
           if (boundary < 0 && !done) {
+            stage = "upstream_read";
             const next = await reader.read();
             done = next.done;
             input += decoder.decode(next.value, { stream: !done });
@@ -82,8 +84,10 @@ export async function translateResponse(response: Response, bridge: ToolBridge |
             boundary = input.indexOf("\n");
           }
           if (boundary < 0 && done && !input) {
+            stage = "truncated_stream";
             if (!complete) throw new Error("Truncated upstream stream");
             if (!emitted) {
+              stage = "tool_parse";
               const message = parsedMessage(bridge, text);
               if (Array.isArray(message.tool_calls)) {
                 controller.enqueue(event({ role: "assistant", tool_calls: message.tool_calls.map((call, index) => ({ ...call, index })) }, "tool_calls"));
@@ -99,7 +103,9 @@ export async function translateResponse(response: Response, bridge: ToolBridge |
           const payload = line.slice(5).trim();
           if (!payload) continue;
           if (payload === "[DONE]") { complete = true; done = true; input = ""; await reader.cancel(); continue; }
+          stage = "event_decode";
           const data = JSON.parse(payload);
+          stage = "upstream_error";
           if (data.error) throw new Error();
           const reason = data.choices?.[0]?.finish_reason;
           if (typeof reason === "string") { complete = true; finishReason = reason; }
@@ -111,9 +117,17 @@ export async function translateResponse(response: Response, bridge: ToolBridge |
             controller.enqueue(event({ content: text.slice(emitted) })); emitted = text.length; return;
           }
         }
-      } catch {
+      } catch (error) {
         await reader.cancel().catch(() => undefined);
-        controller.error(new Error("Claude App tool stream invalid or interrupted"));
+        // Only fixed classifications cross the boundary: exception messages may contain user data.
+        const toolReasons: Record<string, string> = {
+          "A tool call is required": "required_tool_missing",
+          "Invalid experimental tool call": "invalid_tool_call",
+          "Invalid tool arguments": "invalid_tool_arguments",
+        };
+        const reason = stage === "tool_parse" && error instanceof Error
+          ? toolReasons[error.message] ?? "invalid_tool_json" : stage;
+        controller.error(new Error(`Claude App tool stream invalid or interrupted (${reason}; finish=${finishReason}; textChars=${text.length})`));
       }
     },
     async cancel(reason) { await reader.cancel(reason); },

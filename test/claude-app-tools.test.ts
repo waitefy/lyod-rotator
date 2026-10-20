@@ -65,3 +65,31 @@ it("rejects interrupted streams and propagates downstream cancellation", async (
   await result.body!.cancel();
   assert.equal(cancelled, true);
 });
+
+it("distinguishes missing calls, malformed JSON and invalid arguments without exposing response text", async () => {
+  const { bridge } = prepareRequest({ ...request, tool_choice: "required" });
+  const marker = bridge!.instruction.match(/ROTATOR_TOOL_[a-f0-9-]+/i)![0];
+  for (const [content, reason] of [
+    ["PRIVATE_RESPONSE", "required_tool_missing"],
+    [marker + '{"secret":"PRIVATE_RESPONSE"', "invalid_tool_json"],
+    [marker + JSON.stringify({ name: "read", arguments: { path: 42 } }), "invalid_tool_arguments"],
+  ]) {
+    const result = await translateResponse(new Response(sse(content, "stop") + "data: [DONE]\n\n"), bridge, "auto", true);
+    await assert.rejects(result.text(), (error: Error) => {
+      assert.match(error.message, new RegExp(reason!));
+      assert.doesNotMatch(error.message, /PRIVATE_RESPONSE|ROTATOR_TOOL/);
+      return true;
+    });
+  }
+});
+
+it("classifies upstream read failures without forwarding arbitrary error messages", async () => {
+  const { bridge } = prepareRequest(request);
+  const raw = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("PRIVATE_UPSTREAM")); } });
+  const result = await translateResponse(new Response(raw), bridge, "auto", true);
+  await assert.rejects(result.text(), (error: Error) => {
+    assert.match(error.message, /upstream_read/);
+    assert.doesNotMatch(error.message, /PRIVATE_UPSTREAM/);
+    return true;
+  });
+});
