@@ -172,8 +172,8 @@ restart the old bridge. An explicit account-refresh link still rejects a differe
 email; use the general sign-in button or `--login` to add another account.
 Cookies, access tokens and full upstream responses are not shown on the status
 page or retained in its diagnostic JSON. The Firefox profile persists across
-restarts; token renewal requires running the helper again, not signing in anew
-when the browser session remains valid.
+restarts; token renewal requires running the helper again. Explicit account-refresh
+links reuse browser sign-in when the session remains valid.
 
 The initial bridge remains in place. Additional connections are saved privately
 under `accounts/<email-hash>/` inside the helper configuration directory. Each
@@ -182,7 +182,12 @@ chat2api. New bridges reuse the installed images and do not rebuild them. Their
 loopback addresses and ports are allocated separately, including when a bridge
 is stopped. A failed startup removes only the new bridge. The shared sign-in
 profile (including installed extensions such as Bitwarden) is preserved. To switch
-accounts, use ChatGPT's sign-out/account-switch UI in that profile.
+accounts, general sign-in clears only local ChatGPT/OpenAI authentication cookies
+before opening the closed profile. It does not call upstream logout or revoke
+previously connected bridge tokens. Bitwarden, other sites and bridge credentials
+are preserved. Close the dedicated Firefox window before starting another login.
+To refresh an existing account without clearing browser sign-in, use an explicit
+account link or `rotator-chatgpt-login --account user@example.com`.
 
 The progress page reports the account and absolute `session.json` path. Register
 that file through **Advanced** or `lyod-rotator login --provider chatgpt-app`.

@@ -1,5 +1,6 @@
 """Browser login contracts; no real browser, account or Docker operations."""
 import importlib.util
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -53,6 +54,46 @@ class BrowserLoginTest(unittest.TestCase):
             db.executemany("INSERT INTO moz_cookies VALUES (?,?,?,?,?,?,?)", rows)
         db.close()
         self.assertEqual([row[3] for row in login.read_cookies(profile)], ['part0', 'part1'])
+
+    def test_fresh_signin_clears_only_openai_cookies_and_preserves_bitwarden(self):
+        profile = self.root / 'profile'
+        profile.mkdir()
+        extension = profile / 'bitwarden-storage-fixture'
+        extension.write_text('vault-fixture')
+        with closing(sqlite3.connect(profile / 'cookies.sqlite')) as db, db:
+            db.execute('CREATE TABLE moz_cookies(host, name, value)')
+            db.executemany('INSERT INTO moz_cookies VALUES (?,?,?)', [
+                ('.chatgpt.com', 'session', 'private'), ('auth.openai.com', 'session', 'private'),
+                ('vault.bitwarden.com', 'vault', 'keep'), ('accounts.google.com', 'google', 'keep'),
+                ('evilchatgpt.com', 'other', 'keep')])
+        login.clear_browser_signin(profile)
+        with closing(sqlite3.connect(profile / 'cookies.sqlite')) as db, db:
+            self.assertEqual({row[0] for row in db.execute('SELECT host FROM moz_cookies')},
+                             {'vault.bitwarden.com', 'accounts.google.com', 'evilchatgpt.com'})
+        self.assertEqual(extension.read_text(), 'vault-fixture')
+        self.assertEqual(login.read_private(self.root / 'app.prod.yaml'), self.original)
+
+    def test_running_firefox_profile_cannot_be_cleared(self):
+        profile = self.root / 'profile'
+        profile.mkdir()
+        script = "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.lockf(f,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()"
+        process = subprocess.Popen([sys.executable, '-c', script, str(profile / '.parentlock')],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'locked')
+            with self.assertRaisesRegex(login.LoginError, 'Сначала закройте'):
+                login.clear_browser_signin(profile)
+        finally:
+            process.communicate('', timeout=5)
+
+    def test_general_login_uses_fresh_signin_but_explicit_refresh_preserves_it(self):
+        with patch.object(login, 'firefox_login') as browser, patch.object(login, 'read_cookies', return_value=[]), \
+             patch.object(login, 'fetch_session', return_value={"email": "user@example.com", "accessToken": "new-secret"}), \
+             patch.object(login, 'restart_bridge'), patch.object(login, 'check_bridge'):
+            login.connect(self.settings)
+            self.assertTrue(browser.call_args.kwargs['fresh'])
+            login.connect(self.settings, expected='user@example.com')
+            self.assertFalse(browser.call_args.kwargs['fresh'])
 
     def test_fetch_checks_session_and_authenticated_catalog_without_redirects(self):
         client = Mock()
@@ -191,7 +232,7 @@ class BrowserLoginTest(unittest.TestCase):
 
     def test_concurrent_configuration_change_is_not_overwritten(self):
         changed = dict(self.original, port=3049)
-        def browser(_profile):
+        def browser(_profile, **_kwargs):
             login.save_private(self.root / 'app.prod.yaml', changed)
         with patch.object(login, 'firefox_login', side_effect=browser), patch.object(login, 'read_cookies', return_value=[]), \
              patch.object(login, 'fetch_session', return_value={"email": "user@example.com", "accessToken": "new-secret"}), \
@@ -202,7 +243,7 @@ class BrowserLoginTest(unittest.TestCase):
         self.assertEqual(login.read_private(self.root / 'app.prod.yaml'), changed)
 
     def test_parallel_login_is_rejected_before_opening_second_browser(self):
-        def nested(_profile):
+        def nested(_profile, **_kwargs):
             with self.assertRaisesRegex(login.LoginError, 'Вход уже открыт'):
                 login.connect(self.settings)
             raise login.LoginError('Stop fixture')

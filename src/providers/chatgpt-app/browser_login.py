@@ -120,12 +120,36 @@ def fetch_session(cookies, proxy=None):
         raise LoginError("Не удалось проверить сессию ChatGPT. Профиль сохранён; попробуйте снова.") from None
 
 
-def firefox_login(profile):
+def clear_browser_signin(profile):
+    """Clear only local ChatGPT/OpenAI sign-in cookies in a closed Firefox profile.
+
+    No upstream logout: existing sidecar tokens must not be revoked.
+    Firefox's POSIX record lock prevents editing cookies while it is running.
+    Extension data (including Bitwarden) and other sites are left untouched.
+    """
+    with (profile / ".parentlock").open("a") as lock:
+        try:
+            fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, PermissionError):
+            raise LoginError("Сначала закройте отдельное окно Firefox для ChatGPT и повторите вход.") from None
+        database = profile / "cookies.sqlite"
+        if database.exists():
+            with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=rw", uri=True)) as connection:
+                with connection:
+                    connection.execute("""DELETE FROM moz_cookies WHERE host IN
+                        ('chatgpt.com', '.chatgpt.com', 'openai.com', '.openai.com',
+                         'auth.openai.com', '.auth.openai.com',
+                         'auth0.openai.com', '.auth0.openai.com')""")
+
+
+def firefox_login(profile, fresh=False):
     executable = shutil.which("firefox")
     if not executable:
         raise LoginError("Для входа нужен Firefox на этом компьютере.")
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     profile.chmod(0o700)
+    if fresh:
+        clear_browser_signin(profile)
     (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\n'
                                    'user_pref("browser.aboutwelcome.enabled", false);\n')
     process = subprocess.Popen([executable, "--new-instance", "--profile", str(profile), "https://chatgpt.com/"],
@@ -289,7 +313,7 @@ def connect(settings, expected=None, progress=lambda text: None):
         account = email_value(bridge["email"])
         profile = root / "firefox-profiles" / hashlib.sha256(account.encode()).hexdigest()[:24]
         progress("Войдите в ChatGPT и закройте отдельное окно Firefox. Эта страница обновится автоматически.")
-        firefox_login(profile)
+        firefox_login(profile, fresh=expected is None)
         progress("Проверяем вход в ChatGPT…")
         session = fetch_session(read_cookies(profile), settings.get("proxy") or None)
         account = email_value(session["email"])
@@ -337,7 +361,7 @@ body{margin:0;background:#f2ede4;color:#202b22;font:17px/1.6 system-ui;display:g
 main{background:#fffdf9;border:1px solid #deded5;border-radius:24px;padding:36px;max-width:600px;margin:24px}
 h1{line-height:1.15}#status{padding:18px;background:#eef4ee;border-radius:14px}small{color:#566457}
 </style><main><small>LYOD ROTATOR · CHATGPT APP</small><h1>Вход через Firefox</h1>
-<p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. Можно войти в любой свой аккаунт: новый будет добавлен отдельно, существующий обновлён. Сохранённый профиль используется повторно.</p>
+<p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. При общем входе прежний вход ChatGPT в этом окне сбрасывается, чтобы можно было выбрать аккаунт. Подключённые мосты и Bitwarden сохраняются. Сохранённый профиль используется повторно.</p>
 <p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Обновляется только локальный мост на этом ПК.</small>
 <script>async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;if(!d.done)setTimeout(poll,1000)}catch{document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()</script></main></html>"""
 
@@ -433,6 +457,7 @@ def main():
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--open", metavar="URL")
     mode.add_argument("--login", action="store_true")
+    parser.add_argument("--account", help="Обновить указанный аккаунт, сохранив вход в браузере")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--origin", default="https://rotator.lyod.online")
     parser.add_argument("--project", default="lyod-chatgpt-app")
@@ -449,7 +474,9 @@ def main():
             print("Помощник входа ChatGPT App установлен.")
             return 0
         settings = read_private(args.root / "browser-login.json")
-        expected = parse_link(args.open, settings["origin"]) if args.open else None
+        if args.account and not args.login:
+            raise LoginError("Параметр --account используется только с --login.")
+        expected = parse_link(args.open, settings["origin"]) if args.open else email_value(args.account) if args.account else None
         return run_login(settings, expected)
     except Exception as error:
         text = str(error) if isinstance(error, LoginError) else "Не удалось запустить вход ChatGPT App. Проверьте настройку локального моста."
