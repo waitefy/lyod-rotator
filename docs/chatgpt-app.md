@@ -111,3 +111,15 @@ cancellation, safe errors and private file validation using a local fake bridge.
 They do not prove ChatGPT session acceptance, actual model identity, quality,
 multimodal support or limits. A real account smoke test is required before
 production rollout. Claude App is a subsequent integration, not available here.
+
+### Local live smoke test, 2026-10-20
+
+The pinned image built successfully on the PC (Docker Buildx is required).
+Startup, API key rejection and loading one web account passed. A short request
+through the rotator adapter returned 502: chat2api received an upstream 403 HTML
+response at `sentinel prepare`, before model generation. Repeating through the
+existing PC proxy produced the same refusal. The imported JWT was not expired;
+the exact reason for the upstream refusal remains unverified. Real generation,
+streaming and tool use have therefore **not passed** live validation. The test
+sidecar was stopped; production configuration and the model allowlist were left
+unchanged. Resolve the upstream transport refusal before rollout.
