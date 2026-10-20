@@ -121,7 +121,7 @@ def fetch_session(cookies, proxy=None):
 
 
 def clear_browser_signin(profile):
-    """Clear only local ChatGPT/OpenAI sign-in cookies in a closed Firefox profile.
+    """Clear local ChatGPT/OpenAI and Google sign-in cookies in a closed profile.
 
     No upstream logout: existing sidecar tokens must not be revoked.
     Firefox's POSIX record lock prevents editing cookies while it is running.
@@ -139,7 +139,9 @@ def clear_browser_signin(profile):
                     connection.execute("""DELETE FROM moz_cookies WHERE host IN
                         ('chatgpt.com', '.chatgpt.com', 'openai.com', '.openai.com',
                          'auth.openai.com', '.auth.openai.com',
-                         'auth0.openai.com', '.auth0.openai.com')""")
+                         'auth0.openai.com', '.auth0.openai.com',
+                         'google.com', '.google.com',
+                         'accounts.google.com', '.accounts.google.com')""")
 
 
 def firefox_login(profile, fresh=False):

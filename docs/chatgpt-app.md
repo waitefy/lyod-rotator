@@ -182,8 +182,9 @@ chat2api. New bridges reuse the installed images and do not rebuild them. Their
 loopback addresses and ports are allocated separately, including when a bridge
 is stopped. A failed startup removes only the new bridge. The shared sign-in
 profile (including installed extensions such as Bitwarden) is preserved. To switch
-accounts, general sign-in clears only local ChatGPT/OpenAI authentication cookies
-before opening the closed profile. It does not call upstream logout or revoke
+accounts, general sign-in clears local ChatGPT/OpenAI and Google authentication
+cookies before opening the closed profile, so Google cannot silently reuse the
+previous account. It does not call upstream logout or revoke
 previously connected bridge tokens. Bitwarden, other sites and bridge credentials
 are preserved. Close the dedicated Firefox window before starting another login.
 To refresh an existing account without clearing browser sign-in, use an explicit

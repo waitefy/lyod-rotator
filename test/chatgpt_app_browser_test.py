@@ -55,7 +55,7 @@ class BrowserLoginTest(unittest.TestCase):
         db.close()
         self.assertEqual([row[3] for row in login.read_cookies(profile)], ['part0', 'part1'])
 
-    def test_fresh_signin_clears_only_openai_cookies_and_preserves_bitwarden(self):
+    def test_fresh_signin_clears_openai_and_google_signin_but_preserves_bitwarden(self):
         profile = self.root / 'profile'
         profile.mkdir()
         extension = profile / 'bitwarden-storage-fixture'
@@ -64,12 +64,15 @@ class BrowserLoginTest(unittest.TestCase):
             db.execute('CREATE TABLE moz_cookies(host, name, value)')
             db.executemany('INSERT INTO moz_cookies VALUES (?,?,?)', [
                 ('.chatgpt.com', 'session', 'private'), ('auth.openai.com', 'session', 'private'),
-                ('vault.bitwarden.com', 'vault', 'keep'), ('accounts.google.com', 'google', 'keep'),
+                ('vault.bitwarden.com', 'vault', 'keep'),
+                ('accounts.google.com', 'google', 'private'), ('.accounts.google.com', 'google', 'private'),
+                ('google.com', 'google', 'private'), ('.google.com', 'google', 'private'),
+                ('evilgoogle.com', 'other', 'keep'), ('google.com.evil.example', 'other', 'keep'),
                 ('evilchatgpt.com', 'other', 'keep')])
         login.clear_browser_signin(profile)
         with closing(sqlite3.connect(profile / 'cookies.sqlite')) as db, db:
             self.assertEqual({row[0] for row in db.execute('SELECT host FROM moz_cookies')},
-                             {'vault.bitwarden.com', 'accounts.google.com', 'evilchatgpt.com'})
+                             {'vault.bitwarden.com', 'evilgoogle.com', 'google.com.evil.example', 'evilchatgpt.com'})
         self.assertEqual(extension.read_text(), 'vault-fixture')
         self.assertEqual(login.read_private(self.root / 'app.prod.yaml'), self.original)
 
