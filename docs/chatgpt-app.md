@@ -136,8 +136,9 @@ instead of falling back to Gemini, Codex or `auto`.
 
 The `/login-cli` → **ChatGPT App** panel offers **Open Firefox** through the
 user-installed `lyod-chatgpt` URL handler. It opens a local progress page and a
-dedicated Firefox profile. Sign in to the account configured for this bridge,
-then close that separate Firefox window. The helper reads only ChatGPT cookies
+dedicated Firefox profile. Sign in to any of your ChatGPT accounts,
+then close that separate Firefox window. An existing account is refreshed; a new
+account gets its own sidecar pair, private API key and loopback listeners. The helper reads only ChatGPT cookies
 from that dedicated profile and requests `/api/auth/session` directly from
 ChatGPT. It checks the authenticated model catalog before saving the token.
 
@@ -167,17 +168,27 @@ You can also start it directly:
 After successful verification it atomically replaces the sidecar token and
 recreates only the two ChatGPT App containers, using existing images. If startup
 or readiness fails, it restores the previous configuration and attempts to
-restart the old bridge. Wrong-account sign-in never replaces the existing token.
+restart the old bridge. An explicit account-refresh link still rejects a different
+email; use the general sign-in button or `--login` to add another account.
 Cookies, access tokens and full upstream responses are not shown on the status
 page or retained in its diagnostic JSON. The Firefox profile persists across
 restarts; token renewal requires running the helper again, not signing in anew
 when the browser session remains valid.
 
-This first browser flow renews an **existing, single-account local bridge**.
-It does not provision additional sidecars, deploy to production, register accounts
-on a remote rotator or expose the PC bridge to the server. Existing server
-registration stays under **Advanced** in the panel. A local success message
-therefore describes the PC bridge, not production connectivity.
+The initial bridge remains in place. Additional connections are saved privately
+under `accounts/<email-hash>/` inside the helper configuration directory. Each
+transport still serves exactly one account; accounts are never pooled inside
+chat2api. New bridges reuse the installed images and do not rebuild them. Their
+loopback addresses and ports are allocated separately, including when a bridge
+is stopped. A failed startup removes only the new bridge. The shared sign-in
+profile (including installed extensions such as Bitwarden) is preserved. To switch
+accounts, use ChatGPT's sign-out/account-switch UI in that profile.
+
+The progress page reports the account and absolute `session.json` path. Register
+that file through **Advanced** or `lyod-rotator login --provider chatgpt-app`.
+The helper does not deploy to production, register accounts on a remote rotator,
+or expose the PC bridge to the server. A local success message describes the PC
+bridge, not production connectivity.
 
 Test without opening Firefox or using a real account:
 

@@ -78,11 +78,11 @@ class BrowserLoginTest(unittest.TestCase):
         self.assertNotIn('secret-token', str(caught.exception))
         self.assertEqual(client.get.call_count, 1)
 
-    def run_connect(self, email='user@example.com', restart=None):
+    def run_connect(self, email='user@example.com', restart=None, expected=None):
         with patch.object(login, 'firefox_login') as browser, patch.object(login, 'read_cookies', return_value=[]), \
              patch.object(login, 'fetch_session', return_value={"email": email, "accessToken": "new-secret"}), \
              patch.object(login, 'restart_bridge', side_effect=restart) as docker, patch.object(login, 'check_bridge'):
-            result = login.connect(self.settings)
+            result = login.connect(self.settings, expected)
             return result, browser.call_args.args[0], docker.call_count
 
     def test_success_updates_only_token_and_reuses_profile(self):
@@ -96,10 +96,69 @@ class BrowserLoginTest(unittest.TestCase):
         self.assertTrue(status['ok'])
         self.assertNotIn('new-secret', json.dumps(status))
 
-    def test_wrong_account_preserves_bridge_and_does_not_restart(self):
-        with self.assertRaisesRegex(login.LoginError, 'другой аккаунт'):
-            self.run_connect('other@example.com')
+    def test_explicit_refresh_rejects_a_different_account(self):
+        with patch.object(login, 'restart_bridge') as restart:
+            with self.assertRaisesRegex(login.LoginError, 'выбрали обновление'):
+                self.run_connect('other@example.com', expected='user@example.com')
+        restart.assert_not_called()
         self.assertEqual(login.read_private(self.root / 'app.prod.yaml'), self.original)
+        self.assertFalse((self.root / 'login-status.json').exists())
+
+    def provision(self):
+        resolved = {"services": {
+            "chatgpt-app": {"image": "fixture-app", "ports": [{"published": "3040"}]},
+            "chatgpt-app-transport": {"image": "fixture-transport"}}}
+        return patch.object(login.subprocess, 'run', return_value=Mock(stdout=json.dumps(resolved)))
+
+    def test_new_account_has_its_own_bridge_and_original_is_untouched(self):
+        _, old_profile, _ = self.run_connect()
+        with self.provision():
+            result, profile, restarts = self.run_connect('other@example.com')
+        self.assertEqual(result, 'other@example.com')
+        self.assertEqual(profile, old_profile)  # Keeps Bitwarden and the existing browser profile.
+        self.assertEqual(restarts, 1)
+        status = login.read_private(self.root / 'login-status.json')
+        self.assertTrue(status['created'])
+        connection = login.read_private(status['sessionFile'])
+        target = Path(status['sessionFile']).parent
+        config = login.read_private(target / 'app.prod.yaml')
+        self.assertEqual(config['chatgpts'], [{'email': 'other@example.com', 'access_token': 'new-secret'}])
+        self.assertEqual(config['bind'], '127.0.0.1')
+        self.assertNotEqual(connection['baseUrl'], 'http://127.0.0.1:3040/v1')
+        self.assertNotEqual(connection['apiKey'], 'bridge-key')
+        self.assertEqual(login.read_private(self.root / 'session.json')['email'], 'user@example.com')
+        self.assertEqual(login.read_private(self.root / 'app.prod.yaml')['chatgpts'][0]['email'], 'user@example.com')
+        self.assertNotIn('new-secret', json.dumps(status))
+        compose = login.read_private(target / 'compose.json')
+        self.assertNotIn('ports', compose['services']['chatgpt-app'])
+        self.assertEqual(compose['services']['chatgpt-app-transport']['environment']['CHATGPT_TRANSPORT_BIND'],
+                         config['chatgpt_base_url'].split('//')[1].split(':')[0])
+        before = login.read_private(target / 'session.json')
+        with patch.object(login.subprocess, 'run') as provision:
+            self.run_connect('OTHER@example.com')
+        provision.assert_not_called()
+        self.assertFalse(login.read_private(self.root / 'login-status.json')['created'])
+        self.assertEqual(login.read_private(target / 'session.json'), before)
+
+    def test_stopped_accounts_keep_their_address_and_port(self):
+        with self.provision():
+            self.run_connect('first@example.com')
+            first_status = login.read_private(self.root / 'login-status.json')
+            first = login.read_private(first_status['sessionFile'])
+            self.run_connect('second@example.com')
+        second_status = login.read_private(self.root / 'login-status.json')
+        second = login.read_private(second_status['sessionFile'])
+        self.assertNotEqual(first['baseUrl'], second['baseUrl'])
+        first_config = login.read_private(Path(first_status['sessionFile']).parent / 'app.prod.yaml')
+        second_config = login.read_private(Path(second_status['sessionFile']).parent / 'app.prod.yaml')
+        self.assertNotEqual(first_config['chatgpt_base_url'], second_config['chatgpt_base_url'])
+
+    def test_failed_new_account_start_leaves_original_unchanged(self):
+        with self.provision():
+            with self.assertRaisesRegex(login.LoginError, 'Прежние аккаунты не изменены'):
+                self.run_connect('other@example.com', restart=RuntimeError('Failed'))
+        self.assertEqual(login.read_private(self.root / 'app.prod.yaml'), self.original)
+        self.assertEqual(list((self.root / 'accounts').iterdir()), [])
         self.assertFalse((self.root / 'login-status.json').exists())
 
     def test_restart_failure_rolls_back_configuration_and_restarts_old_bridge(self):

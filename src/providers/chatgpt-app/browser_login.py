@@ -1,4 +1,4 @@
-"""User-initiated Firefox sign-in for a preconfigured, single-account local bridge."""
+"""User-initiated Firefox sign-in with a separate local bridge per ChatGPT account."""
 import argparse
 from contextlib import closing
 import fcntl
@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -142,13 +143,18 @@ def firefox_login(profile):
                 process.wait()
 
 
-def restart_bridge(settings):
+def compose_command(settings):
     # Commands come only from the locally installed private settings, never a URL.
     command = ["docker", "compose", "--project-name", settings["project"]]
     for file in settings["composeFiles"]:
         command.extend(["-f", file])
     environment = dict(os.environ, LYOD_CHATGPT_APP_CONFIG_DIR=settings["configDir"])
     environment["LYOD_CHATGPT_APP_TRANSPORT_PROXY"] = settings.get("proxy", "")
+    return command, environment
+
+
+def restart_bridge(settings):
+    command, environment = compose_command(settings)
     subprocess.run(command + ["up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "45",
                               "chatgpt-app-transport", "chatgpt-app"],
                    env=environment, check=True, timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -177,6 +183,91 @@ def check_bridge(bridge):
     raise LoginError("Локальный мост не подтвердил готовность после обновления.")
 
 
+def account_bridge(settings, account, original, bridge):
+    """Reuse an account's bridge, or provision an isolated loopback-only pair."""
+    import yaml
+    root = Path(settings["configDir"])
+    if account == email_value(bridge["email"]):
+        return settings, original, bridge, False
+    target = root / "accounts" / hashlib.sha256(account.encode()).hexdigest()[:24]
+    if target.exists():
+        saved = read_private(target / "browser-login.json")
+        previous = yaml.safe_load((target / "app.prod.yaml").read_text())
+        connection = read_private(target / "session.json")
+        if saved["configDir"] != str(target) or email_value(connection["email"]) != account:
+            raise LoginError("Сохранённое подключение аккаунта повреждено; другие аккаунты не изменены.")
+        return saved, previous, connection, False
+
+    # Reserve stopped accounts too: probing sockets alone cannot detect them.
+    reserved_ports = {urlsplit(bridge["baseUrl"]).port}
+    reserved_hosts = {urlsplit(original.get("chatgpt_base_url", "")).hostname}
+    for descriptor in (root / "accounts").glob("*/session.json"):
+        connection = read_private(descriptor)
+        reserved_ports.add(urlsplit(connection["baseUrl"]).port)
+        config = yaml.safe_load((descriptor.parent / "app.prod.yaml").read_text())
+        reserved_hosts.add(urlsplit(config["chatgpt_base_url"]).hostname)
+    # Both listeners are private. Distinct ports/IPs also work with a host-only proxy.
+    for number in range(2, 255):
+        port, transport_host = 3040 + number * 2, "127.0.0." + str(number)
+        if port in reserved_ports or transport_host in reserved_hosts:
+            continue
+        try:
+            with socket.socket() as app_socket, socket.socket() as transport_socket:
+                app_socket.bind(("127.0.0.1", port))
+                transport_socket.bind((transport_host, 3041))
+            break
+        except OSError:
+            continue
+    else:
+        raise LoginError("Нет свободного локального адреса для нового аккаунта.")
+
+    command, environment = compose_command(settings)
+    result = subprocess.run(command + ["config", "--format", "json"], env=environment,
+                            check=True, timeout=30, capture_output=True, text=True)
+    resolved = json.loads(result.stdout)["services"]
+    services = {}
+    for name in ("chatgpt-app-transport", "chatgpt-app"):
+        source = resolved[name]
+        if not source.get("image"):
+            raise LoginError("Для нового аккаунта нужны готовые образы локального моста.")
+        services[name] = {key: source[key] for key in
+                          ("image", "restart", "environment", "logging") if key in source}
+        services[name].update(network_mode="host", volumes=[{
+            "type": "bind", "source": str(target), "target": "/app/conf",
+            "read_only": name == "chatgpt-app-transport"}])
+    services["chatgpt-app-transport"].setdefault("environment", {}).update(
+        CHATGPT_TRANSPORT_BIND=transport_host, CHATGPT_TRANSPORT_PROXY=settings.get("proxy", ""))
+    services["chatgpt-app-transport"]["healthcheck"] = {
+        "test": ["CMD", "python", "-c",
+                 f"import socket; socket.create_connection(('{transport_host}', 3041), 2).close()"],
+        "interval": "5s", "timeout": "3s", "retries": 3, "start_period": "5s"}
+    services["chatgpt-app"]["depends_on"] = {"chatgpt-app-transport": {"condition": "service_healthy"}}
+    connection = {"email": account, "baseUrl": f"http://127.0.0.1:{port}/v1", "apiKey": secrets.token_urlsafe(32)}
+    config = dict(original, bind="127.0.0.1", port=port, chatgpt_base_url=f"http://{transport_host}:3041",
+                  auth={"access_tokens": [connection["apiKey"]], "access_token_prefix": []}, chatgpts=[])
+    saved = dict(settings, configDir=str(target), project=settings["project"] + "-" + target.name[:12],
+                 composeFiles=[str(target / "compose.json")])
+    target.mkdir(parents=True, mode=0o700)
+    target.chmod(0o700)
+    save_private(target / "compose.json", {"services": services})
+    save_private(target / "session.json", connection)
+    save_private(target / "browser-login.json", saved)
+    return saved, config, connection, True
+
+
+def discard_new_bridge(settings):
+    command, environment = compose_command(settings)
+    subprocess.run(command + ["down"], env=environment, check=True, timeout=90,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    root = Path(settings["configDir"])
+    for name in ("app.prod.yaml", "session.json", "browser-login.json", "compose.json"):
+        (root / name).unlink(missing_ok=True)
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
 def connect(settings, expected=None, progress=lambda text: None):
     root = Path(settings["configDir"])
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -194,34 +285,49 @@ def connect(settings, expected=None, progress=lambda text: None):
         bridge = read_private(session_file)
         accounts = original.get("chatgpts", [])
         if len(accounts) != 1 or email_value(accounts[0].get("email")) != email_value(bridge.get("email")):
-            raise LoginError("Нужен отдельный настроенный мост для одного аккаунта ChatGPT.")
+            raise LoginError("Исходное подключение ChatGPT повреждено; его сессия не изменена.")
         account = email_value(bridge["email"])
-        if expected and expected != account:
-            raise LoginError("Этот локальный мост настроен для другого аккаунта. Его сессия не изменена.")
         profile = root / "firefox-profiles" / hashlib.sha256(account.encode()).hexdigest()[:24]
         progress("Войдите в ChatGPT и закройте отдельное окно Firefox. Эта страница обновится автоматически.")
         firefox_login(profile)
         progress("Проверяем вход в ChatGPT…")
         session = fetch_session(read_cookies(profile), settings.get("proxy") or None)
-        if session["email"] != account:
-            raise LoginError("Вы вошли в другой аккаунт. Прежнее подключение не изменено; повторите вход в нужный аккаунт.")
+        account = email_value(session["email"])
+        if expected and account != email_value(expected):
+            raise LoginError("Вы выбрали обновление " + email_value(expected) + ", но вошли в " + account +
+                             ". Для добавления другого аккаунта используйте общий вход без выбора аккаунта.")
         if yaml.safe_load(config_file.read_text()) != original or read_private(session_file) != bridge:
             raise LoginError("Настройка моста изменилась во время входа. Повторите подключение; новые настройки сохранены.")
-        updated = dict(original, chatgpts=[dict(accounts[0], access_token=session["accessToken"])])
-        progress("Сохраняем подключение…")
-        save_private(config_file, updated)
+        target_settings, previous, connection, created = account_bridge(settings, account, original, bridge)
+        target_file = Path(target_settings["configDir"]) / "app.prod.yaml"
+        previous_accounts = previous.get("chatgpts", [])
+        if not created and (len(previous_accounts) != 1 or email_value(previous_accounts[0].get("email")) != account):
+            raise LoginError("Подключение не соответствует аккаунту; прежняя сессия не изменена.")
+        entry = dict(previous_accounts[0]) if previous_accounts else {"email": account}
+        entry["access_token"] = session["accessToken"]
+        updated = dict(previous, chatgpts=[entry])
+        progress("Добавляем аккаунт…" if created else "Обновляем авторизацию…")
+        save_private(target_file, updated)
         try:
-            restart_bridge(settings)
-            check_bridge(bridge)
+            restart_bridge(target_settings)
+            check_bridge(connection)
         except Exception:
-            save_private(config_file, original)
+            if created:
+                try:
+                    discard_new_bridge(target_settings)
+                except Exception:
+                    raise LoginError("Новый мост не запустился; требуется его ручная очистка. Прежние аккаунты не изменены.") from None
+                raise LoginError("Новый мост не запустился и удалён. Прежние аккаунты не изменены; повторите позже.") from None
+            save_private(target_file, previous)
             try:
-                restart_bridge(settings)
+                restart_bridge(target_settings)
             except Exception:
                 raise LoginError("Мост не запустился. Прежняя сессия восстановлена в файле, но мост нужно запустить вручную.") from None
             raise LoginError("Мост не принял обновление. Прежнее подключение восстановлено; повторите позже.") from None
         # Only safe diagnostic fields are retained, never the raw session response.
-        save_private(root / "login-status.json", {"ok": True, "email": account, "checkedAt": int(time.time())})
+        save_private(root / "login-status.json", {
+            "ok": True, "email": account, "checkedAt": int(time.time()),
+            "created": created, "sessionFile": str(target_file.parent / "session.json")})
         return account
 
 
@@ -231,7 +337,7 @@ body{margin:0;background:#f2ede4;color:#202b22;font:17px/1.6 system-ui;display:g
 main{background:#fffdf9;border:1px solid #deded5;border-radius:24px;padding:36px;max-width:600px;margin:24px}
 h1{line-height:1.15}#status{padding:18px;background:#eef4ee;border-radius:14px}small{color:#566457}
 </style><main><small>LYOD ROTATOR · CHATGPT APP</small><h1>Вход через Firefox</h1>
-<p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. Сохранённый профиль будет использован при следующем подключении.</p>
+<p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. Можно войти в любой свой аккаунт: новый будет добавлен отдельно, существующий обновлён. Сохранённый профиль используется повторно.</p>
 <p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Обновляется только локальный мост на этом ПК.</small>
 <script>async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;if(!d.done)setTimeout(poll,1000)}catch{document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()</script></main></html>"""
 
@@ -271,7 +377,10 @@ def run_login(settings, expected=None, open_page=True):
     def worker():
         try:
             account = connect(settings, expected, progress)
-            state.update(message="ChatGPT подключён: " + account + ". Локальный мост обновлён. Можно закрыть эту страницу.", ok=True)
+            status = read_private(Path(settings["configDir"]) / "login-status.json")
+            action = "Добавлен новый локальный мост" if status["created"] else "Обновлена авторизация локального моста"
+            state.update(message=action + ": " + account + ". Файл подключения: " + status["sessionFile"] +
+                         ". Для регистрации в ротаторе укажите этот файл в Advanced. Можно закрыть страницу.", ok=True)
         except Exception as error:
             state.update(message=str(error) if isinstance(error, LoginError) else
                          "Не удалось завершить вход. Профиль Firefox сохранён; повторите попытку.", ok=False)

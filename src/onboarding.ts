@@ -478,8 +478,9 @@ ${geminiWebLoginPanel(account)}
 then close that window. The helper checks your account and saves the connection automatically.</p>
 <a class="cta" id="chatgpt-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
 <p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
-<div class="note">Requires the ChatGPT App login helper and a configured single-account bridge on this PC.
-This updates the local bridge; it does not deploy a bridge or connect a remote rotator automatically.
+<div class="note">Requires the ChatGPT App login helper and an initial bridge configured on this PC.
+Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
+The progress page provides the connection file for registration below. Remote deployment is separate.
 ChatGPT App sign-in is separate from OpenAI Codex.</div>
 <script>
 (() => {

@@ -290,7 +290,8 @@ it("offers local browser sign-in and keeps remote bridge registration explicit",
   serveCliLogin({ writeHead() {}, end(value: string) { html = value; } } as unknown as ServerResponse);
   assert.match(html, /panel-chatgpt-app/);
   assert.match(html, /lyod-chatgpt:\/\/login/);
-  assert.match(html, /does not deploy a bridge or connect a remote rotator automatically/);
+  assert.match(html, /existing accounts are refreshed; new accounts get separate local bridges/);
+  assert.match(html, /Remote deployment is separate/);
   assert.match(html, /Advanced: register an existing bridge/);
   assert.match(html, /fetch\('\/api\/cli-login'/);
 });
