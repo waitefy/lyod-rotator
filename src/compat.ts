@@ -1,6 +1,7 @@
 import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./providers/google-antigravity/stream-start.js";
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
+import { CHATGPT_APP_PROVIDER, chatGptAppModels, isChatGptAppModel } from "./providers/chatgpt-app/credentials.js";
 import { validateGeneratedWebImage, validateWebImageRequest, webGeminiImageMode, webResponsesImageMode, type WebImageMode } from "./providers/gemini-web/image-output.js";
 import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel } from "./providers/gemini-web/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -157,6 +158,7 @@ function compatRoute(rotator: AccountRotator, model: string): CompatRoute {
     return { off: false, providerId: route.providerId, pinned: true, ...(sameId ? { modelId: route.modelId } : {}) };
   }
   // The legacy unsuffixed Argon id is intentionally absent from the catalog.
+  if (isChatGptAppModel(model)) return { off: false, providerId: CHATGPT_APP_PROVIDER, pinned: true };
   if (getWebThinkingLevel(model) !== undefined) return { off: false, providerId: GEMINI_WEB_PROVIDER, pinned: true };
   if (isCodexModelForRotator(rotator, model)) return { off: false, providerId: "openai-codex", pinned: false };
   if (isOpenCodeZenModel(model)) return { off: false, providerId: OPENCODE_ZEN_PROVIDER_ID, pinned: false };
@@ -169,7 +171,7 @@ function compatRoute(rotator: AccountRotator, model: string): CompatRoute {
  * it. Zen output is normalized to Chat Completions by its forwarder.
  */
 function upstreamFormat(context: RotationAttemptContext): "google" | "ollama" | "opencode-zen" {
-  if (context.providerId === OPENCODE_ZEN_PROVIDER_ID) return "opencode-zen";
+  if (context.providerId === OPENCODE_ZEN_PROVIDER_ID || context.providerId === CHATGPT_APP_PROVIDER) return "opencode-zen";
   if (context.providerId === "ollama") return "ollama";
   return "google";
 }
@@ -2536,8 +2538,8 @@ export interface OpenAIModelCatalogEntry {
   object: "model";
   created: number;
   owned_by: string;
-  context_window: number;
-  max_model_len: number;
+  context_window: number | null;
+  max_model_len: number | null;
   meta: Record<string, unknown>;
 }
 
@@ -2732,6 +2734,16 @@ export function buildOpenAIModelCatalog(
           tool_calling: true,
         },
       });
+    }
+  }
+  if (hasActiveProvider(CHATGPT_APP_PROVIDER)) {
+    for (const id of chatGptAppModels()) {
+      if (!served(CHATGPT_APP_PROVIDER)(id)) continue;
+      catalog.push({ id, object: "model", created: 0, owned_by: CHATGPT_APP_PROVIDER,
+        context_window: null, max_model_len: null,
+        meta: { family: CHATGPT_APP_PROVIDER, provider: CHATGPT_APP_PROVIDER,
+          streaming: true, limited_web: true, usage_estimated: true,
+          availability_unverified: true } });
     }
   }
   for (const model of GEMINI_WEB_MODELS) {
@@ -3139,7 +3151,7 @@ export async function handleOpenAIChatCompletions(
 
   const started = Date.now();
   const streamMode = routedRequest.stream ? "openai" : "none";
-  const bodyToForward: RequestBody = route.providerId === OPENCODE_ZEN_PROVIDER_ID
+  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
     ? { project: "", model: chatReq.model, request: chatReq, requestType: "openai-chat" }
     : (route.providerId === "ollama"
       ? openAIToOllamaBody(chatReq)
@@ -3422,7 +3434,7 @@ export async function handleOpenAIResponsesCreate(
     ? { ...converted.chatRequest, messages: compRes.messages }
     : converted.chatRequest;
 
-  const requestBody: RequestBody = route.providerId === OPENCODE_ZEN_PROVIDER_ID
+  const requestBody: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
     ? { project: "", model: chatRequest.model, request: chatRequest, requestType: "openai-responses" }
     : (route.providerId === "ollama"
       ? openAIToOllamaBody(chatRequest)
@@ -3732,7 +3744,7 @@ export async function handleAnthropicMessages(
 
   const started = Date.now();
   const streamMode = routedValidation.stream ? "anthropic" : "none";
-  const bodyToForward: RequestBody = route.providerId === OPENCODE_ZEN_PROVIDER_ID
+  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
     ? { project: "", model: anthropicReq.model, request: anthropicToOpenAIChatRequest(anthropicReq), requestType: "anthropic" }
     : (route.providerId === "ollama"
       ? anthropicToOllamaBody(anthropicReq)

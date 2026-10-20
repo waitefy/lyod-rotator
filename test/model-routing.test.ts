@@ -47,7 +47,7 @@ describe("model routing", () => {
   it("keeps the historical order by default and follows providerOrder when set", () => {
     // Ollama lists an id OpenCode Zen also lists.
     const shared = { ollama: ["big-pickle"] };
-    assert.deepEqual([...DEFAULT_PROVIDER_ORDER], ["opencode-zen", "openai-codex", "ollama", "google-antigravity", "gemini-web"]);
+    assert.deepEqual([...DEFAULT_PROVIDER_ORDER], ["opencode-zen", "openai-codex", "ollama", "google-antigravity", "gemini-web", "chatgpt-app"]);
     assert.equal((resolveModelRoute(source({}, shared), "big-pickle") as { providerId: string }).providerId, "opencode-zen");
     const reordered = source({ providerOrder: ["ollama"] }, shared);
     assert.equal((resolveModelRoute(reordered, "big-pickle") as { providerId: string }).providerId, "ollama");
@@ -142,6 +142,7 @@ describe("model settings", () => {
       "openai-codex",
       "google-antigravity",
       "gemini-web",
+      "chatgpt-app",
     ]);
   });
 

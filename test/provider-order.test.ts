@@ -16,6 +16,7 @@ describe("provider pool and credential ordering", () => {
       "opencode-zen",
       "openai-codex",
       "gemini-web",
+      "chatgpt-app",
     ]);
   });
 

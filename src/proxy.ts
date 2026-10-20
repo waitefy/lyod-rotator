@@ -381,7 +381,7 @@ export async function classifyUpstreamResponse(
   modelKey: string,
   providerId = DEFAULT_PROVIDER,
 ): Promise<UpstreamAction> {
-  if (providerId === "gemini-web" && !response.ok && response.status !== 429) {
+  if ((providerId === "gemini-web" || providerId === "chatgpt-app") && !response.ok && response.status !== 429) {
     return { kind: "web-error", httpStatus: response.status,
       errorText: await response.text().catch(() => ""), endpoint };
   }
@@ -571,11 +571,11 @@ async function handleUpstreamAccountAction(
   if (action.kind === "web-error") {
     const canRecover = [401, 403, 409, 503, 504].includes(action.httpStatus);
     if (action.httpStatus === 401) {
-      rotator.markProviderInvalid(account, "gemini-web", "Gemini Web session requires reconnection");
+      rotator.markProviderInvalid(account, provider.id, `${provider.displayName} session requires reconnection`);
     } else if (action.httpStatus === 403) {
-      rotator.setProviderCooldown(account, "gemini-web", 60_000);
+      rotator.setProviderCooldown(account, provider.id, 60_000);
     } else if (canRecover) {
-      rotator.setProviderCooldown(account, "gemini-web", 15_000);
+      rotator.setProviderCooldown(account, provider.id, 15_000);
     }
     logRequestEnd(action.httpStatus, `endpoint=${action.endpoint}`);
     if (canRecover && options.canRetry) {
@@ -628,6 +628,7 @@ async function handleUpstreamAccountAction(
     const shouldRetryProviderRateLimit =
       provider.id === "openai-codex" ||
       provider.id === "opencode-zen" ||
+      provider.id === "chatgpt-app" ||
       action.providerResourceExhausted;
     if (
       shouldRetryProviderRateLimit &&

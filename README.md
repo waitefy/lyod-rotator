@@ -26,8 +26,10 @@ This fork was previously named **tuxevil-rotator-argon**.
 - Pinned dependencies, reproducible container provenance and scheduled proposals
   to merge upstream releases. See [fork maintenance](docs/fork-maintenance.md).
 
-ChatGPT App and Claude App web adapters are planned; they are **not implemented**.
-The existing OpenAI Codex provider is a separate integration.
+An experimental **ChatGPT App bridge** is available as an optional, separately
+configured chat2api sidecar; see [setup and validation boundaries](docs/chatgpt-app.md).
+Browser login and production account verification are pending. Claude App is
+planned and **not implemented**. The existing OpenAI Codex provider remains separate.
 
 ## Naming and compatibility
 

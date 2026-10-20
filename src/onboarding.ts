@@ -35,6 +35,7 @@ import type { AccountConfig, Config } from "./types.js";
 import { validateCredentials as validateWebCredentials } from "./providers/gemini-web/credentials.js";
 import { runWebWorker } from "./providers/gemini-web/forward.js";
 import { webAccountFromIdentity } from "./providers/gemini-web/identity.js";
+import { accountFromSessionFile } from "./providers/chatgpt-app/credentials.js";
 
 interface AccountSink {
   addOrUpdateAccount(account: AccountConfig): Promise<void>;
@@ -438,6 +439,7 @@ export function serveCliLogin(
 <div class="tabs">
   <button class="tab active" data-panel="panel-google">Google (Antigravity)</button>
   <button class="tab" data-panel="panel-gemini-web">Gemini App</button>
+  <button class="tab" data-panel="panel-chatgpt-app">ChatGPT App</button>
   <button class="tab" data-panel="panel-codex">OpenAI Codex</button>
   <button class="tab" data-panel="panel-ollama">Ollama Cloud</button>
   <button class="tab" data-panel="panel-zen">OpenCode Zen</button>
@@ -468,6 +470,37 @@ ${authUrl && sessionId ? `<h3 style="margin:24px 0 8px;font-size:18px;">Step 1 &
 
 <div class="panel" id="panel-gemini-web">
 ${geminiWebLoginPanel(account)}
+</div>
+
+<div class="panel" id="panel-chatgpt-app">
+<h3>Connect ChatGPT App bridge</h3>
+<p>Connect an existing chat2api sidecar configured for exactly one account.
+This is separate from OpenAI Codex. Browser sign-in is not implemented here yet.</p>
+<p>Create a private (0600) JSON on the rotator host with email, baseUrl and the sidecar's local apiKey.
+Enter its absolute path below. Web access tokens stay in the sidecar.</p>
+<form id="chatgptAppForm">
+  <input name="sessionFile" required placeholder="/sessions/chatgpt-app.json" style="width:100%;padding:12px" />
+  <button class="cta" type="submit" style="margin-top:12px">Save bridge connection</button>
+  <p id="chatgptAppResult" role="status"></p>
+</form>
+<script>
+document.getElementById('chatgptAppForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  const result = document.getElementById('chatgptAppResult');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/cli-login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'chatgpt-app', sessionFile: form.elements.sessionFile.value.trim() })
+    });
+    const data = await response.json();
+    result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Connectivity and model access are not verified yet.' : data.error;
+  } catch { result.textContent = 'Unable to save bridge connection'; }
+  finally { button.disabled = false; }
+});
+</script>
 </div>
 
 <div class="panel" id="panel-codex">
@@ -793,6 +826,7 @@ export async function handleCliLoginApi(
     email?: string;
     apiKey?: string;
     cookiesFile?: string;
+    sessionFile?: string;
     model?: string;
     enabled?: boolean;
     shadowMode?: boolean;
@@ -810,6 +844,7 @@ export async function handleCliLoginApi(
       email?: string;
       apiKey?: string;
       cookiesFile?: string;
+      sessionFile?: string;
       model?: string;
       enabled?: boolean;
       shadowMode?: boolean;
@@ -823,6 +858,22 @@ export async function handleCliLoginApi(
   }
 
   const provider = body.provider || "google-antigravity";
+
+  if (provider === "chatgpt-app") {
+    let entry: AccountConfig;
+    try {
+      entry = await accountFromSessionFile(typeof body.sessionFile === "string" ? body.sessionFile : "");
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "A private ChatGPT App bridge session JSON is required; see docs/chatgpt-app.md" }));
+      return;
+    }
+    const { isNew } = await addAccountToConfig(entry);
+    await rotator.addOrUpdateAccount(entry);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, email: entry.email, isNew, verified: false }));
+    return;
+  }
 
   if (provider === "gemini-web") {
     const email = typeof body.email === "string" ? body.email.trim() : "";

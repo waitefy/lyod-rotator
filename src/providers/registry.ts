@@ -7,6 +7,7 @@
 //   4. Wire your login flow through `rotator login --provider <id>`
 
 import { geminiWebAdapter } from "./gemini-web/index.js";
+import { chatGptAppAdapter } from "./chatgpt-app/index.js";
 import type { ProviderAdapter } from "./adapter.js";
 import { googleAntigravityAdapter } from "./google-antigravity/index.js";
 import { ollamaAdapter } from "./ollama/index.js";
@@ -43,6 +44,7 @@ const PROVIDERS: Record<string, ProviderAdapter> = {
   "openai-codex": openaiCodexAdapter,
   "opencode-zen": opencodeZenAdapter,
   "gemini-web": geminiWebAdapter,
+  "chatgpt-app": chatGptAppAdapter,
 };
 
 export function getProviderAdapter(providerId: string): ProviderAdapter {
@@ -79,7 +81,7 @@ export function findProviderForModel(
     }
   }
   // Check non-default explicit providers first to prevent Google fallback overlap
-  for (const adapter of [opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, geminiWebAdapter, googleAntigravityAdapter]) {
+  for (const adapter of [chatGptAppAdapter, opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, geminiWebAdapter, googleAntigravityAdapter]) {
     if (adapter.ownsModel?.(model, context)) {
       return adapter;
     }

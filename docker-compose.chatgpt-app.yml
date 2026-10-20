@@ -1,0 +1,17 @@
+# Standalone optional sidecar. Build on the PC, then transfer the image to the host.
+# Use one instance/port/config directory per account; do not pool accounts here.
+services:
+  chatgpt-app:
+    image: lyod-chat2api:dbf6bf396863
+    build:
+      context: https://github.com/aurorax-neo/chat2api.git#dbf6bf39686348449c25de3b6131ca733f448deb
+    ports:
+      - "127.0.0.1:${LYOD_CHATGPT_APP_PORT:-3040}:3040"
+    volumes:
+      - ${LYOD_CHATGPT_APP_CONFIG_DIR:?Set private chat2api config directory}:/app/conf
+    restart: unless-stopped
+    environment:
+      ENV: prod
+      MAX_CONTINUE_COUNT: "1"
+    logging:
+      driver: "none"

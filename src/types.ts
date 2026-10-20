@@ -42,6 +42,8 @@ export type RoutingRejectionReason =
  * and an Ollama Cloud API key).
  */
 export interface ProviderCredential {
+  /** Private web bridge connection file; never contains a Codex OAuth token. */
+  sessionFile?: string;
   /** Provider id: "google-antigravity", "ollama", or "openai-codex". */
   provider: string;
   /** Ollama Cloud: static API key (never expires). */

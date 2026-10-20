@@ -72,6 +72,9 @@ function validateCredentialLengths(
 ): void {
   if (!Array.isArray(credentials)) return;
   for (const cred of credentials) {
+    if (typeof cred.sessionFile === "string" && cred.sessionFile.length > 4096) {
+      throw new Error(`Credential sessionFile for ${cred.provider} exceeds maximum length`);
+    }
     if (typeof cred.cookiesFile === "string" && cred.cookiesFile.length > 4096) {
       throw new Error(`Credential cookiesFile for ${cred.provider} exceeds maximum length`);
     }
