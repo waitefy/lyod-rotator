@@ -1,4 +1,4 @@
-name: Argon engine update proposal
+name: Lyod Rotator engine update proposal
 on:
   schedule:
     - cron: '41 5 * * 1'

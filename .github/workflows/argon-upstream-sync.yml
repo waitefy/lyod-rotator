@@ -1,4 +1,4 @@
-name: Argon upstream sync
+name: Lyod Rotator upstream sync
 
 on:
   schedule:
@@ -101,7 +101,7 @@ jobs:
           git -C "$RUNNER_TEMP/argon-upstream" switch -c "$SYNC_BRANCH"
           git -C "$RUNNER_TEMP/argon-upstream" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
             -c user.name='Rotator upstream sync' -c user.email='rotator-sync@users.noreply.github.com' \
-            commit -m "Merge upstream $UPSTREAM_TAG into Argon fork"
+            commit -m "Merge upstream $UPSTREAM_TAG into Lyod Rotator"
           git -C "$RUNNER_TEMP/argon-upstream" remote set-url origin "https://github.com/$GITHUB_REPOSITORY.git"
           git -C "$RUNNER_TEMP/argon-upstream" push origin "HEAD:refs/heads/$SYNC_BRANCH"
           printf 'commit=%s\n' "$(git -C "$RUNNER_TEMP/argon-upstream" rev-parse HEAD)" >> "$GITHUB_OUTPUT"

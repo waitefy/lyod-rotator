@@ -1,10 +1,11 @@
 {
-  "name": "tuxevil-rotator",
+  "name": "lyod-rotator",
   "version": "4.2.1-argon.1",
-  "description": "Multi-provider, multi-account AI proxy rotator with per-model routing, real-time quota tracking, and infringement detection (Google Antigravity, Ollama Cloud)",
+  "description": "Multi-provider AI gateway with account rotation, quota-aware routing and Gemini App support; a fork of tuxevil-rotator.",
   "license": "MIT",
   "type": "module",
   "bin": {
+    "lyod-rotator": "bin/tuxevil-rotator.js",
     "tuxevil-rotator": "bin/tuxevil-rotator.js",
     "pi-antigravity-rotator": "bin/pi-antigravity-rotator.js"
   },
@@ -49,7 +50,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tuxevil/tuxevil-rotator.git"
+    "url": "git+https://github.com/waitefy/lyod-rotator.git"
   },
   "author": "Sebastián Real (tuxevil)",
   "dependencies": {
@@ -70,5 +71,9 @@
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.62.1"
   },
-  "private": true
+  "private": true,
+  "homepage": "https://github.com/waitefy/lyod-rotator#readme",
+  "bugs": {
+    "url": "https://github.com/waitefy/lyod-rotator/issues"
+  }
 }

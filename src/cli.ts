@@ -1,9 +1,9 @@
-// CLI entry point for tuxevil-rotator
+// CLI entry point for lyod-rotator
 // Usage:
-//   tuxevil-rotator start     Start the proxy
-//   tuxevil-rotator login     Add a new account
-//   tuxevil-rotator status    Show account status
-//   tuxevil-rotator keys      Manage virtual API keys
+//   lyod-rotator start     Start the proxy
+//   lyod-rotator login     Add a new account
+//   lyod-rotator status    Show account status
+//   lyod-rotator keys      Manage virtual API keys
 
 import {
   getConfigDir,
@@ -50,7 +50,7 @@ switch (command) {
     if (providerId === "openai-codex" && importFlag >= 0) {
       const importPath = process.argv[importFlag + 1];
       if (!importPath || importPath.startsWith("--")) {
-        console.error("Usage: tuxevil-rotator login --provider openai-codex --import <auth.json>");
+        console.error("Usage: lyod-rotator login --provider openai-codex --import <auth.json>");
         process.exitCode = 1;
         break;
       }
@@ -198,7 +198,7 @@ switch (command) {
     if (subAction === "list") {
       const keys = await listVirtualKeys();
       if (keys.length === 0) {
-        console.log("No virtual keys found. Use 'tuxevil-rotator keys generate' to create one.");
+        console.log("No virtual keys found. Use 'lyod-rotator keys generate' to create one.");
       } else {
         console.log(`${keys.length} virtual key(s):`);
         console.log("─".repeat(70));
@@ -252,7 +252,7 @@ switch (command) {
     if (subAction === "delete") {
       const hash = args[2];
       if (!hash) {
-        console.error("Usage: tuxevil-rotator keys delete <hash>");
+        console.error("Usage: lyod-rotator keys delete <hash>");
         process.exit(1);
       }
       const deleted = await deleteVirtualKey(hash);
@@ -266,7 +266,7 @@ switch (command) {
     }
 
     console.error(`Unknown subcommand: ${subAction}`);
-    console.log("Usage: tuxevil-rotator keys [list|generate|delete]");
+    console.log("Usage: lyod-rotator keys [list|generate|delete]");
     process.exit(1);
   }
   break;
@@ -378,26 +378,26 @@ switch (command) {
     break;
   }
   default:
-    console.log("Tuxevil Rotator");
+    console.log("Lyod Rotator");
     console.log();
     console.log("Usage:");
-    console.log("  tuxevil-rotator start     Start the proxy (default)");
-    console.log("  tuxevil-rotator login     Add an account (use --provider openai-codex for Codex OAuth)");
-    console.log("  tuxevil-rotator login --provider openai-codex --import <auth.json>");
+    console.log("  lyod-rotator start     Start the proxy (default)");
+    console.log("  lyod-rotator login     Add an account (use --provider openai-codex for Codex OAuth)");
+    console.log("  lyod-rotator login --provider openai-codex --import <auth.json>");
     console.log(
-      "  tuxevil-rotator import    Import Google/Pi accounts from JSON (default: ~/.config/antigravity/accounts.json)",
+      "  lyod-rotator import    Import Google/Pi accounts from JSON (default: ~/.config/antigravity/accounts.json)",
     );
     console.log(
-      "  tuxevil-rotator status    Show account status (JSON)",
+      "  lyod-rotator status    Show account status (JSON)",
     );
     console.log(
-      "  tuxevil-rotator doctor    Validate config and local state",
+      "  lyod-rotator doctor    Validate config and local state",
     );
-    console.log("  tuxevil-rotator doctor --gemini-web-probe  Check Gemini App sessions and Argon access (no generation)");
+    console.log("  lyod-rotator doctor --gemini-web-probe  Check Gemini App sessions and Argon access (no generation)");
     console.log(
-      "  tuxevil-rotator migrate   Copy legacy config files safely",
+      "  lyod-rotator migrate   Copy legacy config files safely",
     );
-    console.log("  tuxevil-rotator keys     Manage virtual API keys");
+    console.log("  lyod-rotator keys     Manage virtual API keys");
     console.log(
       "                                 list   - List all virtual keys",
     );
@@ -407,7 +407,7 @@ switch (command) {
     console.log(
       "                                 delete <hash> - Delete a virtual key",
     );
-    console.log("  tuxevil-rotator install-agent     Install rotator config across multiple agents");
+    console.log("  lyod-rotator install-agent     Install rotator config across multiple agents");
     console.log(
       "                                 [--target <auto|all|opencode,hermes,pi,codex>]",
     );
@@ -420,7 +420,7 @@ switch (command) {
     console.log(
       "                                 [--dry-run]",
     );
-    console.log("  tuxevil-rotator install-opencode  Install auto-discovery plugin for OpenCode");
+    console.log("  lyod-rotator install-opencode  Install auto-discovery plugin for OpenCode");
     console.log(
       "                                 [--host <ip|hostname>] [--user <ssh-user>] [--ssh-key <path>]",
     );

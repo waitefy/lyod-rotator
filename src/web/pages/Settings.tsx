@@ -516,14 +516,14 @@ function AboutPanel(): JSX.Element {
         ]}
       />
       <div class="about-links">
-        <a class="btn btn-secondary btn-md" href="https://github.com/tuxevil/tuxevil-rotator" target="_blank" rel="noopener noreferrer">
+        <a class="btn btn-secondary btn-md" href="https://github.com/waitefy/lyod-rotator" target="_blank" rel="noopener noreferrer">
           <Icon name="github" /> GitHub
         </a>
-        <a class="btn btn-secondary btn-md" href="https://github.com/tuxevil/tuxevil-rotator/issues" target="_blank" rel="noopener noreferrer">
+        <a class="btn btn-secondary btn-md" href="https://github.com/waitefy/lyod-rotator/issues" target="_blank" rel="noopener noreferrer">
           Report an issue
         </a>
         <a class="btn btn-secondary btn-md" href="https://tuxevil.com" target="_blank" rel="noopener noreferrer">
-          <Icon name="globe" /> tuxevil.com
+          <Icon name="globe" /> Upstream: tuxevil.com
         </a>
         {authRequired.value && (
           <Button icon="logout" onClick={() => void signOut()}>

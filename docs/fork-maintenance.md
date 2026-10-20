@@ -1,9 +1,14 @@
-# Argon fork builds
+# Lyod Rotator maintenance
 
 The fork keeps Gemini Web changes on top of a recorded stable rotator release.
 `fork-base.json` records that release's repository, tag and commit. The package
-version follows `<upstream-version>-argon.<revision>`. The Gemini Web client is
+version follows `<upstream-version>-argon.<revision>`. The historical suffix is
+retained for compatibility with release validation and upstream synchronization;
+the product and repository are now named Lyod Rotator. The Gemini Web client is
 pinned separately in `requirements-gemini-web.txt`.
+
+The npm updater is disabled in this fork: it must not install the upstream
+package over Lyod Rotator. Deploy reviewed fork commits or images instead.
 
 ## Validation
 
@@ -25,12 +30,12 @@ match `v<package-version>` when running a tag workflow.
 ## Container build and startup check
 
 ```sh
-docker build --file Dockerfile.gemini-web --tag rotator-argon:local \
+docker build --file Dockerfile.gemini-web --tag lyod-rotator:local \
   --build-arg ROTATOR_VERSION="$(node -p 'require("./package.json").version')" \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg VCS_URL=local \
   --build-arg SOURCE_STATE=dirty .
-node scripts/smoke-gemini-web-image.mjs rotator-argon:local
+node scripts/smoke-gemini-web-image.mjs lyod-rotator:local
 ```
 
 Use `SOURCE_STATE=clean` only after validating a clean checkout. The image's

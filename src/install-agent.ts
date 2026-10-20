@@ -37,7 +37,7 @@ export function buildCompositeInstallerScript(
   const pluginBase64 = Buffer.from(opencodePluginContent, "utf8").toString("base64");
   const rotatorUrl = options.rotatorUrl.replace(/\/+$/, "");
   const providerId = options.providerId || "tuxevil-rotator";
-  const providerName = options.providerName || "Tuxevil Rotator";
+  const providerName = options.providerName || "Lyod Rotator";
   const apiKey = options.apiKey || "no-key";
   const targets = options.targets && options.targets.length > 0 ? options.targets : ["auto"];
   const shouldAuto = targets.includes("auto") || targets.includes("all");
@@ -51,7 +51,7 @@ PROVIDER_NAME="${providerName}"
 API_KEY="${apiKey}"
 
 echo "=========================================================="
-echo "==> Tuxevil Rotator Agent Installer"
+echo "==> Lyod Rotator Agent Installer"
 echo "==> Rotator URL:   $ROTATOR_URL"
 echo "==> Provider ID:   $PROVIDER_ID"
 echo "=========================================================="
@@ -396,7 +396,7 @@ export async function installAgents(options: AgentInstallOptions): Promise<void>
   ).replace(/\/+$/, "");
 
   const providerId = options.providerId || "tuxevil-rotator";
-  const providerName = options.providerName || "Tuxevil Rotator";
+  const providerName = options.providerName || "Lyod Rotator";
   const targets: Array<SupportedAgent | "auto" | "all"> = options.targets && options.targets.length > 0 ? options.targets : ["auto"];
 
   const script = buildCompositeInstallerScript(opencodePluginContent, {

@@ -216,7 +216,7 @@ export function openOAuthBrowser(url: string): boolean {
 }
 
 export async function runLogin(): Promise<AccountConfig> {
-  console.log("=== Tuxevil Rotator - Add Google Antigravity Account ===");
+  console.log("=== Lyod Rotator - Add Google Antigravity Account ===");
   console.log();
 
   const { verifier, challenge } = generatePkce();

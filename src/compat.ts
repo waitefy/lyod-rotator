@@ -2806,7 +2806,7 @@ export function serveGeminiModels(res: ServerResponse, rotator?: AccountRotator)
         baseModelId: family,
         version: "v2.0",
         displayName: id,
-        description: `Tuxevil Rotator Gemini-compatible model entry for ${id}`,
+        description: `Lyod Rotator Gemini-compatible model entry for ${id}`,
         inputTokenLimit: ctx,
         outputTokenLimit: maxOutputTokens,
         supportedGenerationMethods: [

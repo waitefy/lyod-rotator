@@ -24,7 +24,7 @@ function askQuestion(prompt: string): Promise<string> {
  * key suffix unless the user overrides it).
  */
 export async function runLogin(): Promise<AccountConfig> {
-  console.log("=== Tuxevil Rotator - Add Ollama Cloud Account ===");
+  console.log("=== Lyod Rotator - Add Ollama Cloud Account ===");
   console.log();
 
   const apiKey = await askQuestion(

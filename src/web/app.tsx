@@ -60,7 +60,7 @@ function useDocumentTitle(): void {
   const issues = data ? data.accounts.filter(needsAttention).length : 0;
   useEffect(() => {
     const title = page === "not-found" ? "Not found" : PAGE_TITLES[page];
-    document.title = `${issues > 0 ? `(${issues}) ` : ""}${title} · Tuxevil Rotator`;
+    document.title = `${issues > 0 ? `(${issues}) ` : ""}${title} · Lyod Rotator`;
   }, [page, issues]);
 }
 
@@ -188,9 +188,9 @@ function TopBar({ navOpen, onToggleNav }: { navOpen: boolean; onToggleNav: () =>
   return (
     <header class="topbar">
       <div class="topbar-start">
-        <Link href={BASE} class="brand-pill" aria-label="Tuxevil Rotator overview">
+        <Link href={BASE} class="brand-pill" aria-label="Lyod Rotator overview">
           <LogoMark size={22} />
-          <span class="brand-name">Tuxevil Rotator</span>
+          <span class="brand-name">Lyod Rotator</span>
           <span class="brand-sep" aria-hidden="true" />
           <LiveIndicator compact />
         </Link>
@@ -402,7 +402,7 @@ function ProfileMenu(): JSX.Element {
           </span>
           <span class="rail-profile-text">
             <strong>Administrator</strong>
-            <span>{data ? `v${data.version}` : "Tuxevil Rotator"}</span>
+            <span>{data ? `v${data.version}` : "Lyod Rotator"}</span>
           </span>
           <Icon name="more" size={15} class="rail-profile-more" />
         </>
@@ -415,7 +415,7 @@ function ProfileMenu(): JSX.Element {
           <span class="menu-profile-text">
             <strong>Administrator</strong>
             <span>
-              Tuxevil Rotator{data ? ` v${data.version}` : ""}
+              Lyod Rotator{data ? ` v${data.version}` : ""}
               {data ? ` · port ${data.proxyPort}` : ""}
             </span>
           </span>
@@ -601,7 +601,7 @@ function Banners(): JSX.Element | null {
           <strong>Version {latest} is available.</strong> You are running v{update.currentVersion}.
         </div>
         <div class="banner-actions">
-          <a class="btn btn-ghost btn-sm" href="https://github.com/tuxevil/tuxevil-rotator/releases" target="_blank" rel="noopener noreferrer">
+          <a class="btn btn-ghost btn-sm" href="https://github.com/waitefy/lyod-rotator/releases" target="_blank" rel="noopener noreferrer">
             Changelog
           </a>
           <Button
@@ -737,7 +737,7 @@ function LoginScreen(): JSX.Element {
           <LogoMark size={40} />
         </div>
         <div class="login-titles">
-          <h1>Sign in to Tuxevil Rotator</h1>
+          <h1>Sign in to Lyod Rotator</h1>
           <p class="login-help">
             Paste the admin token (<code>TUXEVIL_ROTATOR_ADMIN_TOKEN</code>). Links ending in <code>?token=…</code> sign you in directly.
           </p>

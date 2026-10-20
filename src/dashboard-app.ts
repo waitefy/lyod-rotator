@@ -81,14 +81,14 @@ function renderShell(js: DashboardAsset, css: DashboardAsset): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
-<title>Tuxevil Rotator</title>
+<title>Lyod Rotator</title>
 <link rel="icon" href="${FAVICON}">
 <link rel="stylesheet" href="${css.path}">
 <script type="module" src="${js.path}"></script>
 </head>
 <body>
 <div id="app"></div>
-<noscript>The Tuxevil Rotator dashboard needs JavaScript.</noscript>
+<noscript>The Lyod Rotator dashboard needs JavaScript.</noscript>
 </body>
 </html>
 `;

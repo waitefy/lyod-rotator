@@ -48,7 +48,7 @@ export async function validateApiKey(
 }
 
 export async function runLogin(): Promise<AccountConfig> {
-  console.log("=== Tuxevil Rotator - Add OpenCode Zen Account ===");
+  console.log("=== Lyod Rotator - Add OpenCode Zen Account ===");
   console.log();
 
   const apiKey = await askQuestion("Paste your OpenCode Zen API key: ");

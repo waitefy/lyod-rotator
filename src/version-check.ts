@@ -16,7 +16,9 @@ export interface UpdateInfo {
 	checkedAt: number;
 }
 
-const PACKAGE_NAME = "tuxevil-rotator";
+const PACKAGE_NAME: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).name;
+// Forks are updated through their own release/sync pipeline, never from upstream npm.
+const NPM_UPDATES_ENABLED = PACKAGE_NAME === "tuxevil-rotator";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}`;
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -64,6 +66,7 @@ function isNewerVersion(current: string, latest: string): boolean {
  * Fetch latest version from npm registry.
  */
 async function fetchLatestVersion(): Promise<string | null> {
+	if (!NPM_UPDATES_ENABLED) return null;
 	try {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -123,6 +126,7 @@ export function getUpdateInfo(): UpdateInfo {
  * Performs an initial check after a short delay (10s) to avoid slowing down startup.
  */
 export function startVersionChecker(): void {
+	if (!NPM_UPDATES_ENABLED) return;
 	// Initial delayed check
 	if (!initialCheckTimer) {
 		initialCheckTimer = setTimeout(() => {
@@ -167,6 +171,14 @@ export function stopVersionChecker(): void {
  */
 export function performSelfUpdate(): { ok: boolean; from: string; to: string; message: string } {
 	const currentVersion = getCurrentVersion();
+	if (!NPM_UPDATES_ENABLED) {
+		return {
+			ok: false,
+			from: currentVersion,
+			to: currentVersion,
+			message: "Lyod Rotator uses its fork release and upstream-sync workflow. See docs/fork-maintenance.md; npm self-update is disabled.",
+		};
+	}
 	const targetVersion = cachedInfo.latestVersion || "latest";
 
 	try {

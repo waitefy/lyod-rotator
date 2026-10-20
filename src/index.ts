@@ -34,7 +34,7 @@ function loadConfig(): Config {
 
     if (!config.accounts || config.accounts.length === 0) {
       console.error(
-        "No accounts configured. Run 'tuxevil-rotator login' to add one.",
+        "No accounts configured. Run 'lyod-rotator login' to add one.",
       );
       process.exit(1);
     }
@@ -90,8 +90,8 @@ async function maybeShowStarNudge(): Promise<void> {
 
   // Show it once
   console.log("  ╭──────────────────────────────────────────────────────────╮");
-  console.log("  │  ⭐ Enjoying tuxevil-rotator?                     │");
-  console.log("  │  github.com/tuxevil/tuxevil-rotator              │");
+  console.log("  │  ⭐ Enjoying Lyod Rotator?                     │");
+  console.log("  │  github.com/waitefy/lyod-rotator              │");
   console.log("  │  A star helps others find it. Thanks!                   │");
   console.log("  ╰──────────────────────────────────────────────────────────╯");
   console.log();
@@ -167,7 +167,7 @@ function maybeWarnAboutProxyExposure(config: Config): void {
 }
 
 export async function main(): Promise<void> {
-  console.log("=== Tuxevil Rotator ===");
+  console.log("=== Lyod Rotator ===");
   console.log();
 
   await initDb();

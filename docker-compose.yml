@@ -1,9 +1,10 @@
 services:
   tuxevil-rotator:
-    # Use pre-built multi-arch image from GHCR (recommended)
-    image: ghcr.io/tuxevil/tuxevil-rotator:latest
-    # To build locally from source instead, comment out 'image' above and uncomment 'build' below:
-    # build: .
+    # Build this fork locally; the upstream image does not include its providers.
+    image: lyod-rotator:local
+    build:
+      context: .
+      dockerfile: Dockerfile.gemini-web
     container_name: tuxevil-rotator
     ports:
       - "127.0.0.1:51200:51200"

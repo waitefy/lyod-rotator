@@ -103,7 +103,7 @@ function renderPage(title: string, body: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(title)} · Lyod Rotator</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
   :root {
@@ -432,6 +432,7 @@ export function serveCliLogin(
     renderPage(
       "Add Account",
       `<h1>Add Account</h1>
+      <p>Connect a provider to Lyod Rotator.</p>
 <p>This page works like the CLI login. Pick a provider below and follow the steps to add an account to the rotator.</p>
 
 <div class="tabs">

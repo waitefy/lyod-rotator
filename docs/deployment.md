@@ -1,47 +1,41 @@
-# Deployment
+# Deploying Lyod Rotator
 
-## Option A: npm (Global Install)
-
-```bash
-npm install -g tuxevil-rotator
-tuxevil-rotator login
-tuxevil-rotator start
-```
-
-The proxy starts on `http://0.0.0.0:51200` by default. Dashboard at `http://localhost:51200/dashboard`.
-
-## Option B: Clone from Source
+## Source installation
 
 ```bash
-git clone https://github.com/tuxevil/tuxevil-rotator.git
-cd tuxevil-rotator
-npm install
-npm run login
-npm start
+git clone https://github.com/waitefy/lyod-rotator.git
+cd lyod-rotator
+npm ci
+npm link
+lyod-rotator login
+lyod-rotator start
 ```
 
-## Option C: Docker
+Node.js 22+ is required. Existing `tuxevil-rotator` commands and config paths are
+compatible. Installing the upstream npm package does not install this fork.
+For Gemini App dependencies and sessions, follow [the provider guide](gemini-web.md).
 
-**Pre-built image (recommended):**
+Dashboard: `http://localhost:51200/dashboard`. Add providers at `/login-cli`.
 
-```bash
-docker pull ghcr.io/tuxevil/tuxevil-rotator:latest
-```
+## Docker (build on your PC)
 
-**Using Docker Compose:**
+From this fork's checkout:
 
 ```bash
 mkdir -p docker-data
+docker compose build
 docker compose up -d
 ```
 
-The image is multi-arch (`linux/amd64`, `linux/arm64`). The compose file:
-- Pulls `ghcr.io/tuxevil/tuxevil-rotator:latest`
-- Persists data under `./docker-data` (mapped to `/data` in the container)
-- Publishes the proxy on `127.0.0.1:51200` only (secure by default)
-- Runs as non-root `node` user (UID/GID 1000)
+Compose builds `Dockerfile.gemini-web` into `lyod-rotator:local` and retains the
+existing `tuxevil-rotator` service/container name. It persists data in
+`./docker-data`, binds `127.0.0.1:51200` and runs as UID/GID 1000. Existing Gemini
+session mounts and environment settings must be retained when updating a deployment.
+The upstream GHCR image does not contain this fork's additions.
 
-To build locally from source instead, uncomment `build: .` in `docker-compose.yml`.
+For versioned builds, provenance checks and transfer to a server, see
+[fork maintenance](fork-maintenance.md). Building or publishing a candidate image
+does not update a running service automatically.
 
 **Enable Virtual Keys and Spend Logging inside Docker:**
 
@@ -76,13 +70,13 @@ Create `/etc/systemd/system/tuxevil-rotator.service`:
 
 ```ini
 [Unit]
-Description=Tuxevil Rotator
+Description=Lyod Rotator
 After=network.target
 
 [Service]
 Type=simple
 User=your-user
-WorkingDirectory=/path/to/tuxevil-rotator
+WorkingDirectory=/path/to/lyod-rotator
 ExecStart=/usr/bin/npm start
 Restart=always
 RestartSec=5
@@ -151,17 +145,24 @@ The dashboard signs in with a session cookie. Forwarding `Host` lets the rotator
 
 ## Updating
 
-**npm install:**
+Upstream releases are merged into this fork through the
+[upstream-sync workflow](fork-maintenance.md#upstream-synchronization). Review and
+merge the update before rebuilding. Do not install `tuxevil-rotator@latest` over
+this fork; npm self-update is disabled here.
+
+For a clean source checkout on the branch you deploy:
 
 ```bash
-npm install -g tuxevil-rotator@latest
+git pull --ff-only
+npm ci
 ```
 
-Or use the one-click update button in the dashboard (auto-update notifications appear when a newer version is available).
-
-**Docker:**
+For Docker, rebuild on your PC and transfer the image using your deployment
+procedure. To update a local Compose deployment:
 
 ```bash
-docker compose pull
+docker compose build
 docker compose up -d
 ```
+
+Keep config, session files, volume mounts and existing service names unchanged.

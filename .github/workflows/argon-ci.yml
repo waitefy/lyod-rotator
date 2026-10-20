@@ -1,4 +1,4 @@
-name: Argon fork checks
+name: Lyod Rotator fork checks
 
 on:
   push:
@@ -114,7 +114,7 @@ jobs:
           file: Dockerfile.gemini-web
           load: true
           push: false
-          tags: rotator-argon:ci
+          tags: lyod-rotator:ci
           build-args: |
             ROTATOR_VERSION=${{ steps.package.outputs.version }}
             VCS_REF=${{ steps.package.outputs.commit }}
@@ -126,4 +126,4 @@ jobs:
       - name: Check runtime, pinned client and HTTP startup without credentials
         env:
           ROTATOR_EXPECTED_COMMIT: ${{ steps.package.outputs.commit }}
-        run: node scripts/smoke-gemini-web-image.mjs rotator-argon:ci
+        run: node scripts/smoke-gemini-web-image.mjs lyod-rotator:ci

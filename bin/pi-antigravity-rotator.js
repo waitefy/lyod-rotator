@@ -15,8 +15,7 @@
 
 if (!process.env.PI_ANTIGRAVITY_ROTATOR_SHIM_QUIET) {
   process.stderr.write(
-    "[deprecation] `pi-antigravity-rotator` has been renamed to `tuxevil-rotator`. " +
-      "This shim forwards to the new binary and will be removed in a future major version. " +
+    "[deprecation] Use `lyod-rotator`; `pi-antigravity-rotator` remains a compatibility alias. " +
       "See https://github.com/tuxevil/tuxevil-rotator/blob/main/docs/migrating-from-pi-antigravity-rotator.md\n",
   );
 }

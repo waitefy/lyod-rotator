@@ -1,59 +1,56 @@
-> **Argon fork (experimental):** Gemini App provider `gemini-web`, model `gemini-4-argon-web`. See [setup and limitations](docs/gemini-web.md). Based on upstream v4.2.0; not an official upstream release.
+# Lyod Rotator
 
-<div align="center">
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](package.json)
+[![License](https://img.shields.io/github/license/waitefy/lyod-rotator)](LICENSE)
+[![Fork checks](https://github.com/waitefy/lyod-rotator/actions/workflows/argon-ci.yml/badge.svg)](https://github.com/waitefy/lyod-rotator/actions/workflows/argon-ci.yml)
 
-[![npm version](https://img.shields.io/npm/v/tuxevil-rotator?logo=npm&label=version)](https://www.npmjs.com/package/tuxevil-rotator)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen?logo=node.js)](package.json)
-[![License](https://img.shields.io/github/license/tuxevil/tuxevil-rotator?logo=opensourceinitiative)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/tuxevil/tuxevil-rotator/ci.yml?logo=github&label=CI)](https://github.com/tuxevil/tuxevil-rotator/actions)
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Docker Image](https://img.shields.io/badge/ghcr.io-tuxevil--rotator-blue?logo=docker)](https://github.com/tuxevil/tuxevil-rotator/pkgs/container/tuxevil-rotator)
-[![Stars](https://img.shields.io/github/stars/tuxevil/tuxevil-rotator?style=social)](https://github.com/tuxevil/tuxevil-rotator/stargazers)
+A multi-provider AI gateway with account rotation, quota-aware routing and an
+OpenAI-compatible endpoint for coding agents and other clients.
 
-[![Installations](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftelemetry.tuxevil.com%2Fv1%2Fpublic-stats&query=%24.installsFormatted&label=installations&color=6366f1)](https://telemetry.tuxevil.com/v1/public-stats)
-[![Requests Routed](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftelemetry.tuxevil.com%2Fv1%2Fpublic-stats&query=%24.requestsFormatted&label=requests%20routed&color=10b981)](https://telemetry.tuxevil.com/v1/public-stats)
-[![Input Tokens](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftelemetry.tuxevil.com%2Fv1%2Fpublic-stats&query=%24.tokensInputFormatted&label=input%20tokens&color=3b82f6)](https://telemetry.tuxevil.com/v1/public-stats)
-[![Output Tokens](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftelemetry.tuxevil.com%2Fv1%2Fpublic-stats&query=%24.tokensOutputFormatted&label=output%20tokens&color=8b5cf6)](https://telemetry.tuxevil.com/v1/public-stats)
-[![Estimated Savings](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftelemetry.tuxevil.com%2Fv1%2Fpublic-stats&query=%24.savingsFormatted&label=estimated%20savings&color=f59e0b)](https://telemetry.tuxevil.com/v1/public-stats)
+Lyod Rotator is maintained by [waitefy](https://github.com/waitefy) and builds on
+[tuxevil-rotator](https://github.com/tuxevil/tuxevil-rotator) by
+[Sebastián Real (tuxevil)](https://github.com/tuxevil) and its contributors.
+The recorded upstream base is **v4.2.1**; see [fork-base.json](fork-base.json).
+This fork was previously named **tuxevil-rotator-argon**.
 
-[View live telemetry stats](https://telemetry.tuxevil.com/stats)
+## What this fork adds
 
-![tuxevil-rotator logo](./tuxevil-rotator_logo.png)
+- **Gemini App (`gemini-web`)** alongside the upstream providers. Argon is
+  exposed as separate Low, Medium and High model IDs, with verification of the
+  selected model and no intentional fallback to Flash.
+- An adapter for tool use, streaming, image/file inputs and image generation.
+  Availability depends on the Google account and web protocol; see
+  [Gemini App setup and limitations](docs/gemini-web.md).
+- Browser-based session setup, account identity and quota handling, and provider
+  connection from `/login-cli`.
+- Pinned dependencies, reproducible container provenance and scheduled proposals
+  to merge upstream releases. See [fork maintenance](docs/fork-maintenance.md).
 
-</div>
+ChatGPT App and Claude App web adapters are planned; they are **not implemented**.
+The existing OpenAI Codex provider is a separate integration.
 
-# tuxevil-rotator
+## Naming and compatibility
 
-**Production-ready OpenAI-compatible gateway for multiple free-tier LLM providers.**
+The preferred command is `lyod-rotator`. The `tuxevil-rotator` and
+`pi-antigravity-rotator` entry points remain available. Existing config directories,
+`TUXEVIL_ROTATOR_*` / legacy environment variables, account sessions, service names
+and client provider/model IDs retain their existing meaning. No account migration
+or fresh login is required for this rename.
 
-> **Container migration notice:** `ghcr.io/tuxevil/pi-antigravity-rotator` is deprecated. Use [`ghcr.io/tuxevil/tuxevil-rotator:latest`](https://github.com/tuxevil/tuxevil-rotator/pkgs/container/tuxevil-rotator) for new deployments. The legacy image remains available as a frozen compatibility reference; see the [migration guide](docs/migrating-from-pi-antigravity-rotator.md).
+The historical `-argon.N` version suffix and `argon-*.yml` workflow filenames remain
+compatible with the release and upstream-sync pipeline. The original MIT license
+and author attribution are preserved.
 
-Multi-account load balancing, per-model quota routing, account health scoring, access control with Virtual Keys, and cost auditing — via a single local endpoint that any agent can use. Even with a single account.
+Install this fork **from source or build its container locally**. Installing
+`tuxevil-rotator` from npm or pulling `ghcr.io/tuxevil/tuxevil-rotator` installs the
+upstream project. npm self-update is disabled for this fork to avoid replacing it.
 
-Originally built as a multi-account rotator for Google Antigravity. It now generalizes that rotation layer across free-tier LLM providers with per-account credentials: Google Antigravity, Ollama Cloud, OpenAI Codex, and OpenCode Zen, designed so new providers slot in without modifying core engine logic.
+> This is an unofficial project. Provider terms and account restrictions still apply.
 
-> **⚠️ WARNING:** Using this proxy may put connected accounts at risk of Terms of Service enforcement, including restriction, suspension, or permanent bans. Use at your own risk.
+## Upstream release highlights
 
-<details>
-<summary><strong>⚠️ Terms of Service Warning — Read Before Installing</strong></summary>
+The following release history describes inherited upstream changes.
 
-> [!CAUTION]
-> This is an unofficial tool. Routing traffic through this proxy may violate a provider's Terms of Service or trigger automated abuse or policy enforcement systems.
->
-> **By using this proxy, you acknowledge:**
-> - Your account may be restricted, suspended, shadow-banned, or permanently banned
-> - Multi-account rotation and proxying can increase account risk compared to normal interactive usage
-> - You assume all responsibility for the accounts and traffic routed through this tool
->
-> **Recommendation:** Do not use your primary account on any provider. Prefer disposable or lower-risk accounts, and keep account exposure conservative.
-
-</details>
-
-> **Migrating from `pi-antigravity-rotator`?** Install the new `tuxevil-rotator` package. It includes the new CLI plus a legacy shim, automatically migrates legacy config files, and keeps old environment variables and paths working as fallbacks. See [Migration from pi-antigravity-rotator](docs/migrating-from-pi-antigravity-rotator.md).
-
----
-
-## Current Model Update
 
 - **v4.2.0: Effort routing editor**: Create, edit, rename and disable effort aliases from the Models page, with route previews and unsaved-edit protection. Claude-style requests now select variants from `output_config.effort` or thinking budgets, and model configuration edits apply immediately. Includes automatic discovery of future Codex GPT models across account catalogs. ([Release notes](https://github.com/tuxevil/tuxevil-rotator/releases/tag/v4.2.0); [PR #40](https://github.com/tuxevil/tuxevil-rotator/pull/40) by [@CyR1en](https://github.com/CyR1en))
 
@@ -173,54 +170,43 @@ Existing `enc:v1` records remain decryptable during migration; newly written rec
 
 ## Quick Start
 
-**Requirements:** Node.js 22+ for npm/source installs. Docker image uses Node 22.
+**Requirements:** Node.js 22+. Gemini App setup also needs the dependencies and
+session configuration described in [its setup guide](docs/gemini-web.md).
 
-### Option A: npm
+### Source installation
 
 ```bash
-npm install -g tuxevil-rotator
-tuxevil-rotator login                  # Google Antigravity (default)
-tuxevil-rotator login --provider ollama  # Ollama Cloud (static API key)
-tuxevil-rotator login --provider openai-codex  # ChatGPT OAuth (isolated Codex pool)
-tuxevil-rotator login --provider opencode-zen # OpenCode Zen (static API key)
-tuxevil-rotator start
+git clone https://github.com/waitefy/lyod-rotator.git
+cd lyod-rotator
+npm ci
+npm link                       # exposes lyod-rotator and the legacy commands
+lyod-rotator login              # Google Antigravity
+lyod-rotator start
 ```
 
-Ollama Cloud accounts from a previous `~/ollama-rotator` install are imported automatically at startup — no manual step required.
+Other existing providers use `login --provider ollama`, `--provider openai-codex`
+or `--provider opencode-zen`. Gemini App connection is available at `/login-cli`;
+see [Gemini App setup](docs/gemini-web.md) before sending requests.
 
-> **Coming from `pi-antigravity-rotator`?** Install the new package, then run the guided migration:
->
-> ```bash
-> npm install -g tuxevil-rotator
-> tuxevil-rotator migrate
-> tuxevil-rotator doctor
-> ```
->
-> The migration copies legacy config files without deleting them. The new package also keeps the old CLI as a deprecation shim and honors legacy environment variables and paths. See the [Migration guide](docs/migrating-from-pi-antigravity-rotator.md).
+### Docker (local build)
 
-### Option B: Docker
+Run from a checkout of this fork:
 
 ```bash
 mkdir -p docker-data
+docker compose build
 docker compose up -d
 ```
 
-### Option C: Source
+Compose builds `Dockerfile.gemini-web` as `lyod-rotator:local`. Existing Compose
+service/container names and data mounts are retained for compatibility. Build on
+your PC, then transfer the image to a small server; see
+[fork maintenance](docs/fork-maintenance.md).
 
-```bash
-git clone https://github.com/tuxevil/tuxevil-rotator.git
-cd tuxevil-rotator
-npm install
-npm run login                       # Google Antigravity
-npm run login -- --provider ollama  # Ollama Cloud
-npm run login -- --provider openai-codex  # OpenAI Codex OAuth
-npm run login -- --provider opencode-zen # OpenCode Zen
-npm start
-```
+Dashboard: `http://localhost:51200/dashboard`. Provider connection:
+`http://localhost:51200/login-cli`.
 
-Dashboard opens at `http://localhost:51200/dashboard`
-
-[Full deployment guide →](docs/deployment.md) · [Adding accounts →](docs/adding-accounts.md)
+[Deployment guide →](docs/deployment.md) · [Adding accounts →](docs/adding-accounts.md)
 
 ---
 

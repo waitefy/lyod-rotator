@@ -495,7 +495,7 @@ Pi, сохраняет PNG/JPEG/WebP в текущую папку и возвр�
 
 ```sh
 mkdir -p ~/.pi/agent/extensions
-ln -s /path/to/tuxevil-rotator-argon/plugins/pi-gemini-images.js ~/.pi/agent/extensions/rotator-images.js
+ln -s /path/to/lyod-rotator/plugins/pi-gemini-images.js ~/.pi/agent/extensions/rotator-images.js
 ```
 
 Затем выполните `/reload` в Pi или перезапустите его. Выберите модель

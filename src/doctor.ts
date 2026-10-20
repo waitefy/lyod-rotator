@@ -103,7 +103,7 @@ export async function runDoctor(
 }
 
 export function printDoctorReport(result: DoctorResult): void {
-  console.log("Tuxevil Rotator Doctor");
+  console.log("Lyod Rotator Doctor");
   console.log();
   console.log(`Status: ${result.ok ? "OK" : "ERROR"}`);
   console.log();
