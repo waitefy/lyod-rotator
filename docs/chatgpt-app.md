@@ -103,13 +103,32 @@ use existing provider credential merging; Google and Codex credentials remain.
 Set on the rotator process, then restart that process:
 
 ```sh
-LYOD_CHATGPT_APP_MODELS=gpt-5-6-mini
+LYOD_CHATGPT_APP_MODELS=gpt-6,gpt-5-6-mini
 ```
 
-This example slug was returned by the real test account's `/backend-api/models`
-and used in a successful smoke request. Other accounts may differ. Choose only
-slugs confirmed available on your account. No models are enabled by default.
-Public IDs become `chatgpt-app-gpt-5-6-mini`, etc.; the
+Both example slugs were returned by the real free test account's
+`/backend-api/models` and accepted in separate live requests on 2026-10-20.
+The server's message metadata identified `gpt-6` and `gpt-5-6-mini`, respectively.
+The catalog calls the latter GPT-5.6 Luna; OpenAI's October rollout assigns
+GPT-6 Luna to Free and Go accounts ([announcement](https://openai.com/index/gpt-6-for-everyone/)).
+Other accounts may differ. Choose only slugs confirmed available on your account.
+No models are enabled by default.
+
+Use `chatgpt-app-gpt-6` as the primary selection in your client and
+`chatgpt-app-gpt-5-6-mini` as a separate, explicitly selected alternative.
+Allowlist order makes GPT-6 the provider's benchmark model; it does not override
+the model selected by the client or enable automatic fallback.
+
+For a local start, save the assignment above in a private environment file and
+load it into the rotator process, for example:
+
+```sh
+node --env-file="$HOME/.config/lyod-rotator/chatgpt-app/models.env" --import tsx/esm src/cli.ts start
+```
+
+Run from the repository root with the account registered as described above.
+This environment file configures the rotator, not the chat2api sidecar.
+Public IDs become `chatgpt-app-gpt-6`, `chatgpt-app-gpt-5-6-mini`; the
 prefix is stripped only at the sidecar boundary. Unknown/unconfigured IDs fail
 instead of falling back to Gemini, Codex or `auto`.
 
