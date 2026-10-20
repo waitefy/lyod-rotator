@@ -1,3 +1,4 @@
+import { accountFromSessionFile as claudeAccountFromSessionFile } from "./providers/claude-app/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfiguredAdminToken } from "./admin-auth.js";
 import { addAccountToConfig } from "./account-store.js";
@@ -440,6 +441,7 @@ export function serveCliLogin(
   <button class="tab active" data-panel="panel-google">Google (Antigravity)</button>
   <button class="tab" data-panel="panel-gemini-web">Gemini App</button>
   <button class="tab" data-panel="panel-chatgpt-app">ChatGPT App</button>
+  <button class="tab" data-panel="panel-claude-app">Claude App</button>
   <button class="tab" data-panel="panel-codex">OpenAI Codex</button>
   <button class="tab" data-panel="panel-ollama">Ollama Cloud</button>
   <button class="tab" data-panel="panel-zen">OpenCode Zen</button>
@@ -510,6 +512,54 @@ document.getElementById('chatgptAppForm').addEventListener('submit', async (even
     const response = await fetch('/api/cli-login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider: 'chatgpt-app', sessionFile: form.elements.sessionFile.value.trim() })
+    });
+    const data = await response.json();
+    result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Connectivity and model access are not verified yet.' : data.error;
+  } catch { result.textContent = 'Unable to save bridge connection'; }
+  finally { button.disabled = false; }
+});
+</script>
+</details>
+</div>
+
+<div class="panel" id="panel-claude-app">
+<h3>Sign in to Claude App</h3>
+<p>Open the local login helper, sign in to Claude in its separate Firefox window,
+then close that window. The helper checks your account and saves the connection automatically.</p>
+<a class="cta" id="claude-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
+<div class="note">Requires the Claude App login helper installed on this PC.
+Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
+The progress page provides the connection file for registration below. Remote deployment is separate.
+Free accounts use Auto: the website selects the model. Named models require separate verification.</div>
+<script>
+(() => {
+  const button = document.getElementById('claude-connect');
+  const link = new URL('lyod-claude://login');
+  link.searchParams.set('origin', location.origin);
+  if (button.dataset.account) link.searchParams.set('account', button.dataset.account);
+  button.href = link.href;
+})();
+</script>
+<details style="margin-top:24px"><summary>Advanced: register an existing bridge with this rotator</summary>
+<p>Create a private (0600) JSON on the rotator host with email, baseUrl, the sidecar's local apiKey and modelSelection (default-only or explicit).
+Enter its absolute path below. Web access tokens stay in the sidecar.</p>
+<form id="claudeAppForm">
+  <input name="sessionFile" required placeholder="/sessions/claude-app.json" style="width:100%;padding:12px" />
+  <button class="cta" type="submit" style="margin-top:12px">Save bridge connection</button>
+  <p id="claudeAppResult" role="status"></p>
+</form>
+<script>
+document.getElementById('claudeAppForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  const result = document.getElementById('claudeAppResult');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/cli-login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'claude-app', sessionFile: form.elements.sessionFile.value.trim() })
     });
     const data = await response.json();
     result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Connectivity and model access are not verified yet.' : data.error;
@@ -876,13 +926,13 @@ export async function handleCliLoginApi(
 
   const provider = body.provider || "google-antigravity";
 
-  if (provider === "chatgpt-app") {
+  if (provider === "chatgpt-app" || provider === "claude-app") {
     let entry: AccountConfig;
     try {
-      entry = await accountFromSessionFile(typeof body.sessionFile === "string" ? body.sessionFile : "");
+      entry = await (provider === "claude-app" ? claudeAccountFromSessionFile : accountFromSessionFile)(typeof body.sessionFile === "string" ? body.sessionFile : "");
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "A private ChatGPT App bridge session JSON is required; see docs/chatgpt-app.md" }));
+      res.end(JSON.stringify({ ok: false, error: "A private App bridge session JSON is required; see the provider documentation" }));
       return;
     }
     const { isNew } = await addAccountToConfig(entry);

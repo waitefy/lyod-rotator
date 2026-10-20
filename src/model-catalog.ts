@@ -28,6 +28,7 @@ export const DEFAULT_PROVIDER_ORDER: readonly string[] = [
   "google-antigravity",
   "gemini-web",
   "chatgpt-app",
+  "claude-app",
 ];
 
 /** The rotator state the catalog reads. Test stubs may omit any of it. */

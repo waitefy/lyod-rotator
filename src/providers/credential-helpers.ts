@@ -100,6 +100,7 @@ export const PROVIDER_ORDER: string[] = [
   "openai-codex",
   "gemini-web",
   "chatgpt-app",
+  "claude-app",
 ];
 
 export const PROVIDER_ORDER_RANK: Record<string, number> = {
@@ -109,6 +110,7 @@ export const PROVIDER_ORDER_RANK: Record<string, number> = {
   "openai-codex": 4,
   "gemini-web": 5,
   "chatgpt-app": 6,
+  "claude-app": 7,
 };
 
 // Ollama Cloud currently exposes one account-wide usage pool. Keep the old

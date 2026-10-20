@@ -1,3 +1,4 @@
+import { CLAUDE_APP_PROVIDER, claudeAppModels, isClaudeAppModel } from "./providers/claude-app/credentials.js";
 import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./providers/google-antigravity/stream-start.js";
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
@@ -158,6 +159,7 @@ function compatRoute(rotator: AccountRotator, model: string): CompatRoute {
     return { off: false, providerId: route.providerId, pinned: true, ...(sameId ? { modelId: route.modelId } : {}) };
   }
   // The legacy unsuffixed Argon id is intentionally absent from the catalog.
+  if (isClaudeAppModel(model)) return { off: false, providerId: CLAUDE_APP_PROVIDER, pinned: true };
   if (isChatGptAppModel(model)) return { off: false, providerId: CHATGPT_APP_PROVIDER, pinned: true };
   if (getWebThinkingLevel(model) !== undefined) return { off: false, providerId: GEMINI_WEB_PROVIDER, pinned: true };
   if (isCodexModelForRotator(rotator, model)) return { off: false, providerId: "openai-codex", pinned: false };
@@ -171,7 +173,7 @@ function compatRoute(rotator: AccountRotator, model: string): CompatRoute {
  * it. Zen output is normalized to Chat Completions by its forwarder.
  */
 function upstreamFormat(context: RotationAttemptContext): "google" | "ollama" | "opencode-zen" {
-  if (context.providerId === OPENCODE_ZEN_PROVIDER_ID || context.providerId === CHATGPT_APP_PROVIDER) return "opencode-zen";
+  if (context.providerId === OPENCODE_ZEN_PROVIDER_ID || context.providerId === CHATGPT_APP_PROVIDER || context.providerId === CLAUDE_APP_PROVIDER) return "opencode-zen";
   if (context.providerId === "ollama") return "ollama";
   return "google";
 }
@@ -2746,6 +2748,16 @@ export function buildOpenAIModelCatalog(
           availability_unverified: true } });
     }
   }
+  if (hasActiveProvider(CLAUDE_APP_PROVIDER)) {
+    for (const id of claudeAppModels()) {
+      if (!served(CLAUDE_APP_PROVIDER)(id)) continue;
+      catalog.push({ id, object: "model", created: 0, owned_by: CLAUDE_APP_PROVIDER,
+        context_window: null, max_model_len: null,
+        meta: { family: CLAUDE_APP_PROVIDER, provider: CLAUDE_APP_PROVIDER,
+          streaming: true, limited_web: true, usage_estimated: true,
+          availability_unverified: true } });
+    }
+  }
   for (const model of GEMINI_WEB_MODELS) {
     if (!hasActiveProvider(GEMINI_WEB_PROVIDER) || !served(GEMINI_WEB_PROVIDER)(model)) continue;
     catalog.push({
@@ -3151,7 +3163,7 @@ export async function handleOpenAIChatCompletions(
 
   const started = Date.now();
   const streamMode = routedRequest.stream ? "openai" : "none";
-  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
+  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER || route.providerId === CLAUDE_APP_PROVIDER)
     ? { project: "", model: chatReq.model, request: chatReq, requestType: "openai-chat" }
     : (route.providerId === "ollama"
       ? openAIToOllamaBody(chatReq)
@@ -3434,7 +3446,7 @@ export async function handleOpenAIResponsesCreate(
     ? { ...converted.chatRequest, messages: compRes.messages }
     : converted.chatRequest;
 
-  const requestBody: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
+  const requestBody: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER || route.providerId === CLAUDE_APP_PROVIDER)
     ? { project: "", model: chatRequest.model, request: chatRequest, requestType: "openai-responses" }
     : (route.providerId === "ollama"
       ? openAIToOllamaBody(chatRequest)
@@ -3744,7 +3756,7 @@ export async function handleAnthropicMessages(
 
   const started = Date.now();
   const streamMode = routedValidation.stream ? "anthropic" : "none";
-  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER)
+  const bodyToForward: RequestBody = (route.providerId === OPENCODE_ZEN_PROVIDER_ID || route.providerId === CHATGPT_APP_PROVIDER || route.providerId === CLAUDE_APP_PROVIDER)
     ? { project: "", model: anthropicReq.model, request: anthropicToOpenAIChatRequest(anthropicReq), requestType: "anthropic" }
     : (route.providerId === "ollama"
       ? anthropicToOllamaBody(anthropicReq)

@@ -17,10 +17,12 @@ describe("provider pool and credential ordering", () => {
       "openai-codex",
       "gemini-web",
       "chatgpt-app",
+      "claude-app",
     ]);
   });
 
   it("resolves pool keys to provider ids correctly", () => {
+    assert.equal(getProviderIdForPoolKey("claude-app"), "claude-app");
     assert.equal(getProviderIdForPoolKey("claude"), "google-antigravity");
     assert.equal(getProviderIdForPoolKey("gemini"), "google-antigravity");
     assert.equal(getProviderIdForPoolKey("session"), "ollama");
