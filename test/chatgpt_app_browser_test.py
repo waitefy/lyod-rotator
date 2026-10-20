@@ -129,6 +129,31 @@ class BrowserLoginTest(unittest.TestCase):
             result = login.connect(self.settings, expected)
             return result, browser.call_args.args[0], docker.call_count
 
+    def test_remote_registration_precedes_success_and_receives_no_web_token(self):
+        self.settings['remote'] = {'sshHost': 'root@rotator.example'}
+        with patch.object(login, 'register_remote', return_value=True) as register:
+            self.run_connect()
+        self.assertTrue(login.read_private(self.root / 'login-status.json')['registered'])
+        connection = register.call_args.args[1]
+        self.assertNotIn('accessToken', connection)
+        self.assertEqual(connection['apiKey'], 'bridge-key')
+
+    def test_registration_failure_preserves_local_bridge_and_has_no_false_success(self):
+        self.settings['remote'] = {'sshHost': 'root@rotator.example'}
+        with patch.object(login, 'register_remote', side_effect=login.LoginError('SSH failed')):
+            with self.assertRaisesRegex(login.LoginError, 'SSH failed'):
+                self.run_connect()
+        self.assertEqual(login.read_private(self.root / 'app.prod.yaml')['chatgpts'][0]['access_token'], 'new-secret')
+        self.assertFalse((self.root / 'login-status.json').exists())
+
+    def test_registration_error_is_redacted_and_suggests_retry_without_browser(self):
+        self.settings['remote'] = {'sshHost': 'root@rotator.example'}
+        with patch.object(login.subprocess, 'run', side_effect=RuntimeError('private-secret')):
+            with self.assertRaises(login.LoginError) as caught:
+                login.register_remote(self.settings, login.read_private(self.root / 'session.json'))
+        self.assertIn('--register-only', str(caught.exception))
+        self.assertNotIn('private-secret', str(caught.exception))
+
     def test_success_updates_only_token_and_reuses_profile(self):
         result, profile, restarts = self.run_connect()
         self.assertEqual(result, 'user@example.com')

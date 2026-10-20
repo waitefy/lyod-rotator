@@ -294,6 +294,23 @@ def discard_new_bridge(settings):
         pass
 
 
+def register_remote(settings, connection):
+    if not settings.get("remote"):
+        return False
+    try:
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("remote_registration.py"))],
+                                input=json.dumps({"remote": settings["remote"], "connection": connection}),
+                                text=True, capture_output=True, check=True, timeout=240)
+        response = json.loads(result.stdout)
+        if response.get("registered") is not True or response.get("email") != connection["email"]:
+            raise ValueError()
+        return True
+    except Exception:
+        raise LoginError("Локальный мост сохранён, но сервер не подтвердил подключение. Проверьте SSH и повторите "
+                         "rotator-chatgpt-login --register-only --account " + connection["email"] +
+                         ". Повторный вход в Firefox не нужен.") from None
+
+
 def connect(settings, expected=None, progress=lambda text: None):
     root = Path(settings["configDir"])
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -350,10 +367,13 @@ def connect(settings, expected=None, progress=lambda text: None):
             except Exception:
                 raise LoginError("Мост не запустился. Прежняя сессия восстановлена в файле, но мост нужно запустить вручную.") from None
             raise LoginError("Мост не принял обновление. Прежнее подключение восстановлено; повторите позже.") from None
+        if settings.get("remote"):
+            progress("Подключаем закрытый туннель и регистрируем аккаунт на сервере…")
+        registered = register_remote(settings, connection)
         # Only safe diagnostic fields are retained, never the raw session response.
         save_private(root / "login-status.json", {
             "ok": True, "email": account, "checkedAt": int(time.time()),
-            "created": created, "sessionFile": str(target_file.parent / "session.json")})
+            "created": created, "registered": registered, "sessionFile": str(target_file.parent / "session.json")})
         return account
 
 
@@ -364,7 +384,7 @@ main{background:#fffdf9;border:1px solid #deded5;border-radius:24px;padding:36px
 h1{line-height:1.15}#status{padding:18px;background:#eef4ee;border-radius:14px}small{color:#566457}
 </style><main><small>LYOD ROTATOR · CHATGPT APP</small><h1>Вход через Firefox</h1>
 <p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. При общем входе прежний вход ChatGPT в этом окне сбрасывается, чтобы можно было выбрать аккаунт. Подключённые мосты и Bitwarden сохраняются. Сохранённый профиль используется повторно.</p>
-<p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Обновляется только локальный мост на этом ПК.</small>
+<p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Мост остаётся на ПК. Если настроен сервер, аккаунт подключится к нему автоматически.</small>
 <script>async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;if(!d.done)setTimeout(poll,1000)}catch{document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()</script></main></html>"""
 
 
@@ -404,9 +424,11 @@ def run_login(settings, expected=None, open_page=True):
         try:
             account = connect(settings, expected, progress)
             status = read_private(Path(settings["configDir"]) / "login-status.json")
-            action = "Добавлен новый локальный мост" if status["created"] else "Обновлена авторизация локального моста"
-            state.update(message=action + ": " + account + ". Файл подключения: " + status["sessionFile"] +
-                         ". Для регистрации в ротаторе укажите этот файл в Advanced. Можно закрыть страницу.", ok=True)
+            if status.get("registered"):
+                message = "Аккаунт подключён к ротатору: " + account + ". Можно закрыть страницу."
+            else:
+                message = "Локальный мост сохранён: " + account + ". Файл подключения: " + status["sessionFile"] + ". Серверная регистрация не настроена."
+            state.update(message=message, ok=True)
         except Exception as error:
             state.update(message=str(error) if isinstance(error, LoginError) else
                          "Не удалось завершить вход. Профиль Firefox сохранён; повторите попытку.", ok=False)
@@ -459,6 +481,7 @@ def main():
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--open", metavar="URL")
     mode.add_argument("--login", action="store_true")
+    parser.add_argument("--register-only", action="store_true", help="Повторить серверную регистрацию без браузера")
     parser.add_argument("--account", help="Обновить указанный аккаунт, сохранив вход в браузере")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--origin", default="https://rotator.lyod.online")
@@ -478,6 +501,19 @@ def main():
         settings = read_private(args.root / "browser-login.json")
         if args.account and not args.login:
             raise LoginError("Параметр --account используется только с --login.")
+        if args.register_only:
+            if not args.login or not settings.get("remote"):
+                raise LoginError("Для регистрации нужна настройка сервера и режим --login.")
+            connection = read_private(args.root / "session.json")
+            if args.account and email_value(args.account) != email_value(connection["email"]):
+                digest = hashlib.sha256(email_value(args.account).encode()).hexdigest()[:24]
+                connection = read_private(args.root / "accounts" / digest / "session.json")
+                if email_value(connection["email"]) != email_value(args.account):
+                    raise LoginError("Сохранённое подключение не соответствует выбранному аккаунту.")
+            check_bridge(connection)
+            register_remote(settings, connection)
+            print("Аккаунт подключён к ротатору: " + connection["email"])
+            return 0
         expected = parse_link(args.open, settings["origin"]) if args.open else email_value(args.account) if args.account else None
         return run_login(settings, expected)
     except Exception as error:

@@ -190,11 +190,39 @@ are preserved. Close the dedicated Firefox window before starting another login.
 To refresh an existing account without clearing browser sign-in, use an explicit
 account link or `rotator-chatgpt-login --account user@example.com`.
 
-The progress page reports the account and absolute `session.json` path. Register
-that file through **Advanced** or `lyod-rotator login --provider chatgpt-app`.
-The helper does not deploy to production, register accounts on a remote rotator,
-or expose the PC bridge to the server. A local success message describes the PC
-bridge, not production connectivity.
+For automatic server registration, add a trusted `remote` object to the private
+`browser-login.json` on the PC (this cannot be supplied by a website login URL):
+
+```json
+"remote": {
+  "sshHost": "root@rotator.example",
+  "serverSessionDir": "/var/lib/tuxevil-rotator-gemini-session",
+  "containerSessionDir": "/sessions",
+  "serverConfigDir": "/var/lib/tuxevil-rotator-stage",
+  "apiBaseUrl": "http://127.0.0.1:51201",
+  "portOffset": 10000
+}
+```
+
+The host needs an existing mounted session directory, Python 3, a reachable
+rotator API and its private `.admin-token`. The PC needs noninteractive SSH
+access with a verified host key and a working systemd user manager. After local
+sign-in, the helper creates one persistent loopback-only SSH reverse tunnel per
+account, transfers only the bridge connection (not the ChatGPT token), verifies
+the bridge from the server and registers it through `/api/cli-login`. Existing
+account credentials are merged by the rotator. Identical tunnels are not
+restarted on refresh. The PC must stay powered on.
+
+Success is reported only after server registration is confirmed. If registration
+fails, the local bridge remains saved. Retry without Firefox:
+
+```sh
+rotator-chatgpt-login --register-only --account user@example.com
+```
+
+Without `remote`, the helper saves only a local bridge and explicitly reports
+that server registration is not configured. Manual registration through
+**Advanced** remains available.
 
 Test without opening Firefox or using a real account:
 
