@@ -117,6 +117,7 @@ bridge listener or reuse the website session as a public API credential.
   Authentication errors affect Claude App credentials only; other providers on
   the same account remain intact.
 - An optional private `adminApiKey` enables pool diagnosis after a bridge 500/504.
+  The probe forces a fresh pool snapshot instead of reusing the admin cache.
   Only a single exhausted account with a future reset time and no valid/invalid
   entries is mapped to 429 with Retry-After. Unknown errors retain their status.
   The administrative response contains cookies and must never be logged or
@@ -145,5 +146,14 @@ encountered an exhausted sidecar account, rather than verifying the new live
 completion path. The corrected error mapping returned 429 in 32 ms without a
 new generation. The bridge supplied a reset timestamp, but it does not preserve
 enough detail to distinguish a quota response from every other temporary
-restriction. Successful native streaming completion and a real client tool
-round trip still require a live check once the account becomes eligible.
+restriction.
+
+A subsequent direct website probe accepted a short temporary-chat request
+(HTTP 200 with a completion event) while the bridge still considered the account
+exhausted. After restarting only the local sidecar to clear that stale in-memory
+state, the native Messages path returned exactly `CLAUDE_OK`, with its first text
+at 4.632 seconds and `[DONE]` at 4.971 seconds. The following tool control request
+again caused the bridge to park the account; tool execution remains unverified.
+The previous cached admin snapshot initially masked this new state, so failure
+diagnosis now requests `/api/cookies?refresh=true`. No repeated automatic reset
+or retry loop is enabled, and the initial upstream refusal remains undetermined.

@@ -47,7 +47,8 @@ before(async () => {
   directory = await mkdtemp(join(tmpdir(), "lyod-claude-test-"));
   sessionFile = join(directory, "session.json");
   bridge = createServer(async (req, res) => {
-    if (req.url === "/api/cookies") {
+    if (req.url?.startsWith("/api/cookies")) {
+      assert.equal(req.url, "/api/cookies?refresh=true", "Pool diagnosis must bypass the stale admin cache");
       assert.equal(req.headers.authorization, "Bearer admin-private-key");
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(poolState)); return;

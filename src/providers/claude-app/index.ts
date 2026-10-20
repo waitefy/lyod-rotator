@@ -14,7 +14,7 @@ import type { BridgeSession } from "./credentials.js";
 async function exhaustedRetryAfter(session: BridgeSession, signal?: AbortSignal): Promise<string | undefined> {
   if (!session.adminApiKey) return undefined;
   try {
-    const response = await fetch(`${new URL(session.baseUrl).origin}/api/cookies`, {
+    const response = await fetch(`${new URL(session.baseUrl).origin}/api/cookies?refresh=true`, {
       headers: { Authorization: `Bearer ${session.adminApiKey}` }, redirect: "error",
       signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(signal ? [signal] : [])]),
     });
