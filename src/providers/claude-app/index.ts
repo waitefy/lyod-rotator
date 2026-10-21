@@ -2,6 +2,7 @@ import { toBridgeRequest, fromBridgeResponse } from "./wire.js";
 import { prepareRequest, translateResponse } from "./tools.js";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { webAppContextWindow } from "../web-app/context.js";
 import type { ProviderAdapter } from "../adapter.js";
 import type { AccountConfig } from "../../types.js";
 import { fetchClaudeMessage } from "./request.js";
@@ -135,7 +136,7 @@ export const claudeAppAdapter: ProviderAdapter = {
     }
   },
   createStreamAccumulator: () => new OpenCodeZenSseAccumulator(),
-  listModels: () => claudeAppModels().map((id) => ({ id, contextWindow: null,
+  listModels: () => claudeAppModels().map((id) => ({ id, contextWindow: webAppContextWindow(id),
     quotaPool: CLAUDE_APP_PROVIDER, source: "catalog" })),
   ownsModel: isClaudeAppModel,
   getPoolKey: () => CLAUDE_APP_PROVIDER,

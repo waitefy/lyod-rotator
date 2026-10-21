@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { webAppContextWindow } from "./context.js";
 import type { ProviderAdapter } from "../adapter.js";
 import { fetchWithHeadersTimeout } from "../../fetch-with-retry.js";
 import { OpenCodeZenSseAccumulator } from "../opencode-zen/forward.js";
@@ -91,7 +92,7 @@ export function createWebAppAdapter(provider: WebAppProvider): ProviderAdapter {
     },
     createStreamAccumulator: () => new OpenCodeZenSseAccumulator(),
     listModels: (context) => listedModels(context.accounts ?? [], provider).map((model) => ({
-      id: `${provider}-${model.id}`, contextWindow: null, quotaPool: `${provider}:${provider}-${model.id}`, source: "discovered" })),
+      id: `${provider}-${model.id}`, contextWindow: webAppContextWindow(`${provider}-${model.id}`), quotaPool: `${provider}:${provider}-${model.id}`, source: "discovered" })),
     ownsModel: (model) => model.startsWith(`${provider}-`), getPoolKey: (model) => `${provider}:${model}`,
     getKickstartModelForPool: () => undefined,
     getBenchmark(account) {

@@ -87,7 +87,7 @@ describe("Gemini Web integration", () => {
     assert.deepEqual(buildOpenAIModelCatalog(source(true) as never).filter((m) => m.owned_by === "gemini-web").map((m) => m.id), GEMINI_WEB_MODELS);
     assert.equal(buildOpenAIModelCatalog(source(true) as never).some((m) => m.id === LEGACY_MODEL), false);
     assert.equal(entry.owned_by, "gemini-web");
-    assert.equal(entry.context_window, 262144);
+    assert.equal(entry.context_window, 1_000_000);
     assert.equal(entry.meta.tool_calling, false);
     assert.equal(entry.meta.multimodal, true);
     assert.equal(entry.meta.usage_unavailable, true);

@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { webAppContextWindow } from "../web-app/context.js";
 import type { ProviderAdapter } from "../adapter.js";
 import type { AccountConfig } from "../../types.js";
 import { fetchWithHeadersTimeout } from "../../fetch-with-retry.js";
@@ -87,7 +88,7 @@ export const chatGptAppAdapter: ProviderAdapter = {
     }
   },
   createStreamAccumulator: () => new OpenCodeZenSseAccumulator(),
-  listModels: () => chatGptAppModels().map((id) => ({ id, contextWindow: null,
+  listModels: () => chatGptAppModels().map((id) => ({ id, contextWindow: webAppContextWindow(id),
     quotaPool: CHATGPT_APP_PROVIDER, source: "catalog" })),
   ownsModel: isChatGptAppModel,
   getPoolKey: () => CHATGPT_APP_PROVIDER,

@@ -28,7 +28,7 @@ except ImportError:
     GeminiError = Exception
 
 # Mirror GEMINI_WEB_MAX_PROMPT_BYTES in credentials.ts.
-MAX_PROMPT_BYTES = 4 * 1024 * 1024
+MAX_PROMPT_BYTES = 16 * 1024 * 1024
 # Mirror attachments.ts. No local paths or remote URLs cross this protocol.
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024

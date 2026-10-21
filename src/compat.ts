@@ -1,11 +1,12 @@
 import { webAppProvider, WEB_APP_PROVIDERS, listedModels } from "./providers/web-app/credentials.js";
+import { webAppContextWindow } from "./providers/web-app/context.js";
 import { CLAUDE_APP_PROVIDER, claudeAppModels, isClaudeAppModel } from "./providers/claude-app/credentials.js";
 import { ANTIGRAVITY_STREAM_START_TIMEOUT_MS } from "./providers/google-antigravity/stream-start.js";
 import { StringDecoder } from "node:string_decoder";
 import { webCapabilityError } from "./providers/gemini-web/forward.js";
 import { CHATGPT_APP_PROVIDER, chatGptAppModels, isChatGptAppModel } from "./providers/chatgpt-app/credentials.js";
 import { validateGeneratedWebImage, validateWebImageRequest, webGeminiImageMode, webResponsesImageMode, type WebImageMode } from "./providers/gemini-web/image-output.js";
-import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel } from "./providers/gemini-web/credentials.js";
+import { GEMINI_WEB_CONTEXT, GEMINI_WEB_MAX_PROMPT_BYTES, GEMINI_WEB_MODELS, GEMINI_WEB_PROVIDER, getWebThinkingLevel } from "./providers/gemini-web/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import {
@@ -2745,7 +2746,7 @@ export function buildOpenAIModelCatalog(
     for (const id of chatGptAppModels()) {
       if (!served(CHATGPT_APP_PROVIDER)(id)) continue;
       catalog.push({ id, object: "model", created: 0, owned_by: CHATGPT_APP_PROVIDER,
-        context_window: null, max_model_len: null,
+        context_window: webAppContextWindow(id), max_model_len: webAppContextWindow(id),
         meta: { family: CHATGPT_APP_PROVIDER, provider: CHATGPT_APP_PROVIDER,
           streaming: true, limited_web: true, usage_estimated: true,
           availability_unverified: true } });
@@ -2755,7 +2756,7 @@ export function buildOpenAIModelCatalog(
     for (const id of claudeAppModels()) {
       if (!served(CLAUDE_APP_PROVIDER)(id)) continue;
       catalog.push({ id, object: "model", created: 0, owned_by: CLAUDE_APP_PROVIDER,
-        context_window: null, max_model_len: null,
+        context_window: webAppContextWindow(id), max_model_len: webAppContextWindow(id),
         meta: { family: CLAUDE_APP_PROVIDER, provider: CLAUDE_APP_PROVIDER,
           streaming: true, limited_web: true, usage_estimated: true,
           availability_unverified: true } });
@@ -2767,7 +2768,7 @@ export function buildOpenAIModelCatalog(
       const id = `${provider}-${model.id}`;
       if (!served(provider)(id)) continue;
       catalog.push({ id, object: "model", created: 0, owned_by: provider,
-        context_window: null, max_model_len: null,
+        context_window: webAppContextWindow(id), max_model_len: webAppContextWindow(id),
         meta: { family: provider, provider, streaming: true, limited_web: true,
           usage_estimated: true, availability_unverified: true, multimodal: false,
           tool_calling: true, tool_protocol: "text-emulated", thinking: model.thinking,
@@ -2782,7 +2783,7 @@ export function buildOpenAIModelCatalog(
       meta: {
         context_length: GEMINI_WEB_CONTEXT, family: "gemini-web", provider: GEMINI_WEB_PROVIDER,
         multimodal: true, tool_calling: false, streaming: true, limited_web: true,
-        usage_unavailable: true, system_prompt: "text-emulated", max_prompt_bytes: 48000,
+        usage_unavailable: true, system_prompt: "text-emulated", max_prompt_bytes: GEMINI_WEB_MAX_PROMPT_BYTES,
       },
     });
   }

@@ -161,10 +161,10 @@ func serve(home string) error {
 	cfg.KeepToolPreamble = true
 	cfg.LiveThoughts = false
 	cfg.DefaultThinking = 1
-	// Rotator already enforces its 4 MiB text budget. Reserve room for the
+	// Rotator already enforces its 16 MiB text budget. Reserve room for the
 	// engine's protocol instructions and schemas without truncating tool history.
-	cfg.MaxPromptChars = 8 * 1024 * 1024
-	cfg.MaxOldToolChars = 8 * 1024 * 1024
+	cfg.MaxPromptChars = 32 * 1024 * 1024
+	cfg.MaxOldToolChars = 32 * 1024 * 1024
 	cfg.LogLevel = "silent"
 	cfg.StreamTimeout = deadline
 	cfg.FirstByteTimeout = 65 * time.Second
