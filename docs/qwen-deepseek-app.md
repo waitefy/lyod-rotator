@@ -87,6 +87,9 @@ invented values. Usage counters from the bridge are estimates, not billing data.
 - Credentials are stored in private files, not commands, URLs or systemd units.
   The server gets a local bridge key, never the website token. Error text and
   process logs do not expose upstream payloads.
+- Qwen's 15-minute access tokens refresh before expiry using the saved auth
+  cookies. A per-account lock prevents concurrent refreshes; rotated credentials
+  are atomically saved with mode 0600 on the PC. Chat generations are not replayed.
 - A failed catalog refresh empties runtime availability. Missing/stale model
   metadata cannot select a guessed default model.
 

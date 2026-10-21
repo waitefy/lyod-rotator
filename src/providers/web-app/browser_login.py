@@ -109,6 +109,22 @@ def extract_token(profile, provider):
     raise LoginError("В профиле не найдена активная сессия. Завершите вход на сайте и закройте окно.")
 
 
+def refresh_credentials(profile):
+    """Only Qwen auth/clearance cookies, never unrelated browser cookies."""
+    with (profile / ".parentlock").open("a") as lock:
+        try:
+            fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LoginError("Сначала закройте отдельное окно Firefox.") from None
+        with closing(sqlite3.connect((profile / "cookies.sqlite").resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            rows = db.execute("SELECT name,value FROM moz_cookies WHERE ((host='.qwen.ai' AND name='refresh_token') OR (host='auth.qwen.ai' AND name IN ('auth-session','acw_tc'))) AND originAttributes='' AND (expiry=0 OR expiry>?) ORDER BY lastAccessed", (int(time.time()),)).fetchall()
+    fields = {"refresh_token": "refreshToken", "auth-session": "authSession", "acw_tc": "authClearance"}
+    result = {fields[key]: value for key, value in rows}
+    if not result.get("refreshToken"):
+        raise LoginError("В профиле не найдена сессия обновления Qwen. Завершите вход на сайте.")
+    return result
+
+
 def allocate(root, provider, email, account_id):
     directory = root / "accounts" / hashlib.sha256(email.encode()).hexdigest()[:24]
     descriptor = directory / "session.json"
@@ -210,6 +226,8 @@ def connect(settings, expected=None, progress=lambda _text: None):
         firefox_login(profile, domain)
         token = extract_token(profile, provider)
         version = frontend_version(profile) if provider == "qwen-app" else None
+        refresh = refresh_credentials(profile) if provider == "qwen-app" else {}
+        auth_config = dict(token=token, frontendVersion=version, **refresh)
         if settings.get("proxy"):
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
                 os.environ[key] = settings["proxy"]
@@ -222,6 +240,9 @@ def connect(settings, expected=None, progress=lambda _text: None):
                 from freetokenapi.deepseek.client import DeepSeekClient
                 client = DeepSeekClient(token=token, timeout=30)
             try:
+                if provider == "qwen-app":
+                    from qwen_auth import QwenAuth
+                    await QwenAuth(auth_config).ensure(client)
                 return await verify_identity(client, provider)
             finally:
                 await client.aclose()
@@ -236,8 +257,8 @@ def connect(settings, expected=None, progress=lambda _text: None):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = directory / "transport.json"
         previous = ui.read_private(path) if path.exists() else None
-        ui.save_private(path, dict(provider=provider, email=email, accountId=account_id, token=token,
-                                  port=int(connection["baseUrl"].split(":")[-1].split("/")[0]), apiKey=connection["apiKey"], proxy=settings.get("proxy"), frontendVersion=version))
+        ui.save_private(path, dict(provider=provider, email=email, accountId=account_id, **auth_config,
+                                  port=int(connection["baseUrl"].split(":")[-1].split("/")[0]), apiKey=connection["apiKey"], proxy=settings.get("proxy")))
         try:
             start_bridge(directory, provider)
             connection["availableModels"] = check_bridge(connection)

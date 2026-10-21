@@ -85,7 +85,7 @@ async def verify_identity(client, provider):
     return account_id, email
 
 
-def configure(config):
+def configure(config, config_path=None):
     if config.get("provider") not in ("qwen-app", "deepseek-app") or not config.get("token") or not config.get("apiKey"):
         raise ValueError("Invalid private bridge configuration")
     actual = subprocess.check_output(["git", "-C", str(SOURCE), "rev-parse", "HEAD"], text=True).strip()
@@ -109,6 +109,14 @@ def configure(config):
             raise ValueError("Verified Qwen frontend version required; refresh the saved browser profile")
         from freetokenapi.qwen import client as qwen_client
         qwen_client.COMMON_HEADERS["version"] = version
+        from qwen_auth import QwenAuth
+        auth = QwenAuth(config, config_path)
+        class RefreshingClient(qwen_client.QwenClient):
+            async def check_auth(self):
+                await auth.ensure(self)
+                return await super().check_auth()
+        upstream.QwenClient = RefreshingClient
+        upstream.qwen_session_refresh = auth
     upstream.MAX_RETRIES = qwen_api.MAX_RETRIES = 0
     upstream._reduced_prompt_variants = lambda *_args, **_kwargs: []
 
@@ -160,6 +168,11 @@ def create_app(config, upstream):
         return JSONResponse({"error": {"message": "Invalid chat request"}}, status_code=400)
 
     async def catalog():
+        if provider == "qwen-app" and getattr(upstream, "qwen_session_refresh", None):
+            pool = upstream.app.state.qwen_pool
+            if not pool or len(pool.accounts) != 1:
+                raise HTTPException(401)
+            await upstream.qwen_session_refresh.ensure(pool.accounts[0].client)
         if time.monotonic() - cache["at"] < 60 and cache["models"]:
             return cache["models"]
         cache.update(at=0, models=[])
@@ -253,7 +266,7 @@ def main():
     os.umask(0o077)
     try:
         config = private_json(args.config)
-        upstream = configure(config)
+        upstream = configure(config, args.config)
         import uvicorn
         uvicorn.run(create_app(config, upstream), host="127.0.0.1", port=int(config["port"]),
                     log_level="critical", access_log=False)
