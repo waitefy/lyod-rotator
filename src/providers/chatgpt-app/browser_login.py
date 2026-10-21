@@ -19,6 +19,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from firefox_extensions import install_bitwarden
+
 ROOT = Path("~/.config/lyod-rotator/chatgpt-app").expanduser()
 SCHEME = "lyod-chatgpt"
 DESKTOP_ID = "lyod-chatgpt-login.desktop"
@@ -154,6 +157,7 @@ def firefox_login(profile, fresh=False):
         clear_browser_signin(profile)
     (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\n'
                                    'user_pref("browser.aboutwelcome.enabled", false);\n')
+    install_bitwarden(profile)
     process = subprocess.Popen([executable, "--new-instance", "--profile", str(profile), "https://chatgpt.com/"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

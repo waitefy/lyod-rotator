@@ -56,6 +56,7 @@ def firefox_login(profile, fresh):
             with closing(sqlite3.connect(profile / "cookies.sqlite")) as db, db:
                 db.execute("DELETE FROM moz_cookies WHERE host IN ('claude.ai','.claude.ai','google.com','.google.com','accounts.google.com','.accounts.google.com')")
     (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser",false);\nuser_pref("browser.aboutwelcome.enabled",false);\n')
+    ui.install_bitwarden(profile)
     process = subprocess.Popen([executable, "--new-instance", "--profile", str(profile), "https://claude.ai/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         if process.wait(timeout=1800) != 0:

@@ -16,6 +16,9 @@ import urllib.request
 import urllib.error
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from firefox_extensions import install_bitwarden
+
 
 class LoginError(ValueError):
     """Safe, actionable diagnostic; never includes upstream error text."""
@@ -103,6 +106,7 @@ def browser_login(profile, destination, firefox="firefox"):
     (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\n'
                                     'user_pref("browser.aboutwelcome.enabled", false);\n'
                                     'user_pref("signon.rememberSignons", false);\n')
+    install_bitwarden(profile)
     process = subprocess.Popen([executable, "--new-instance", "--profile", str(profile), "https://gemini.google.com/app"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("В отдельном окне Firefox войдите в Google и проверьте, что доступен Argon.", flush=True)

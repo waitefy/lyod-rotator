@@ -22,6 +22,14 @@ profile so Google cannot silently reuse the last account; existing connections
 are preserved. An account without a full unmasked email gets a stable
 `@deepseek-app.local` identity derived from its server account ID.
 
+All five App login helpers (ChatGPT, Claude, Gemini, Qwen and DeepSeek) reuse a
+locally installed Bitwarden XPI from
+`~/.config/lyod-rotator/browser-extensions/bitwarden.xpi` (or the existing ChatGPT
+profile). Existing extensions are retained. New profiles receive only the signed
+extension package, without copying vault data or Bitwarden authentication from
+another profile; sign into Bitwarden separately in each profile when needed.
+Login remains available if no local extension package is installed.
+
 Private settings are under `~/.config/lyod-rotator/{qwen-app,deepseek-app}`.
 The installer reuses an existing Claude helper's **remote registration settings**,
 not its credentials. On a new installation configure the same `remote` object

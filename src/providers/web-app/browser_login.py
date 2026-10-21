@@ -32,6 +32,7 @@ def firefox_login(profile, domain):
         raise LoginError("Для входа нужен Firefox.")
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     (profile / "user.js").write_text('user_pref("browser.shell.checkDefaultBrowser",false);\nuser_pref("browser.aboutwelcome.enabled",false);\n')
+    ui.install_bitwarden(profile)
     process = subprocess.Popen(["firefox", "--new-instance", "--profile", str(profile), "https://" + domain + "/"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
