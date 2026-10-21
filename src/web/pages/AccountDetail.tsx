@@ -1,6 +1,7 @@
 // Account drawer: everything about one account and every action on it.
 
 import type { JSX } from "preact";
+import { CustomQuotas } from "./CustomQuotas.js";
 import type { AccountTier, ModelQuota } from "../../types.js";
 import type { DashboardAccount, DashboardOverview } from "../../dashboard-types.js";
 import { formatCount, formatUsd } from "../lib/format.js";
@@ -104,6 +105,7 @@ export function AccountDetail({ email, onClose }: { email: string; onClose: () =
       {account.lastError && <ErrorBlock message={account.lastError} />}
 
       <ProviderProblems account={account} />
+      <CustomQuotas key={account.id ?? account.email} account={account} />
 
       <section class="detail-section">
         <h3>Quota</h3>

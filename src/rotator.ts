@@ -1,3 +1,5 @@
+import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule } from "./custom-quota.js";
+import type { CustomQuotaRule, CustomQuotaUsage } from "./types.js";
 import {
   type AccountConfig,
   type AccountRuntime,
@@ -491,6 +493,9 @@ export class AccountRotator {
   private tokenUsageSaveInflight = false;
   private tokenUsageSavePending = false;
 
+  private customQuotaUsage: Record<string, CustomQuotaUsage> = {};
+  private customQuotaPending = new WeakMap<AccountRuntime, Record<string, number>>();
+
   constructor(private config: Config) {
     this.config = applyConfigDefaults(config);
     this.initAccounts();
@@ -674,6 +679,7 @@ export class AccountRotator {
           this.accounts.length - 1,
         );
       }
+      this.customQuotaUsage = state.customQuotaUsage ?? {};
       this.protectivePauseUntil = state.protectivePauseUntil ?? 0;
       this.protectivePauseReason = state.protectivePauseReason ?? null;
       this.allowFreshWindowStarts = state.allowFreshWindowStarts ?? true;
@@ -870,6 +876,7 @@ export class AccountRotator {
         provider429Events: [...this.provider429Events],
       },
       disabledProvidersByAccount,
+      customQuotaUsage: { ...this.customQuotaUsage },
       accounts: {},
     };
     for (const account of this.accounts) {
@@ -1676,6 +1683,7 @@ export class AccountRotator {
       account,
       modelKey,
       now,
+      ignoreConcurrency,
     );
     if (providerRejection) return providerRejection;
     const defaultCooldown = account.cooldownsByModel["__default__"] ?? 0;
@@ -2724,6 +2732,15 @@ export class AccountRotator {
   recordRequest(account: AccountRuntime, model?: string, providerId?: string): boolean {
     account.requestsSinceRotation++;
     account.totalRequests++;
+    const budgetProvider = providerId ?? (model ? getProviderIdForPoolKey(this.resolveRequestPoolKey(model)) : undefined);
+    if (budgetProvider) {
+      const budget = this.getCustomQuota(account, budgetProvider);
+      if (budget) this.customQuotaUsage[customQuotaKey(account.config, budgetProvider)] = {
+        used: budget.used + 1,
+        startedAt: budget.startedAt ?? Date.now(),
+        windowHours: budget.windowHours,
+      };
+    }
     account.lastUsed = Date.now();
     account.consecutiveErrors = 0;
     account.lastError = null;
@@ -3944,6 +3961,10 @@ export class AccountRotator {
 
   startRequest(account: AccountRuntime, modelKey?: string): void {
     const key = modelKey ?? "__default__";
+    const providerId = this.ollamaModels.has(key) ? "ollama" : getProviderIdForPoolKey(key);
+    const pending = this.customQuotaPending.get(account) ?? {};
+    pending[providerId] = (pending[providerId] ?? 0) + 1;
+    this.customQuotaPending.set(account, pending);
     // Ollama Cloud imposes no per-account concurrency limit, so its
     // requests must not activate in-flight tracking at all (the monthly
     // pool and raw ollama model names from benchmark probes).
@@ -3959,7 +3980,13 @@ export class AccountRotator {
 
   finishRequest(account: AccountRuntime, modelKey?: string): void {
     const key = modelKey ?? "__default__";
-    if (isOllamaQuotaPoolKey(key) || this.ollamaModels.has(key)) return;
+    const providerId = this.ollamaModels.has(key) ? "ollama" : getProviderIdForPoolKey(key);
+    const pending = this.customQuotaPending.get(account);
+    if (pending) pending[providerId] = Math.max(0, (pending[providerId] ?? 0) - 1);
+    if (isOllamaQuotaPoolKey(key) || this.ollamaModels.has(key)) {
+      this.requestWaiterDrain();
+      return;
+    }
     account.inFlightByModel[key] = Math.max(
       0,
       (account.inFlightByModel[key] ?? 0) - 1,
@@ -3987,6 +4014,7 @@ export class AccountRotator {
     account: AccountRuntime,
     modelKey: string,
     now = Date.now(),
+    ignoreConcurrency = false,
   ): { reason: RoutingRejectionReason; detail: string } | null {
     const accountId = getAccountIdentity(account);
     if (
@@ -4034,6 +4062,16 @@ export class AccountRotator {
       return {
         reason: "provider-ineligible",
         detail: "Codex credential is missing or empty",
+      };
+    }
+    const budget = this.getCustomQuota(account, providerId, now);
+    if (budget) {
+      const pending = this.customQuotaPending.get(account)?.[providerId] ?? 0;
+      if (budget.used >= budget.requests) return {
+        reason: "quota-zero", detail: "local request budget exhausted",
+      };
+      if (!ignoreConcurrency && budget.used + pending >= budget.requests) return {
+        reason: "account-concurrency", detail: "remaining local request budget reserved by in-flight requests",
       };
     }
     if ((account.providerCooldowns?.[providerId] ?? 0) > now) {
@@ -4183,6 +4221,8 @@ export class AccountRotator {
       ) {
         continue;
       }
+      const budget = this.getCustomQuota(account, candidateProviderId, now);
+      if (budget && budget.used >= budget.requests && budget.resetAt) retryTimes.push(budget.resetAt);
       const providerCooldown = account.providerCooldowns?.[candidateProviderId] ?? 0;
       if (providerCooldown > now) retryTimes.push(providerCooldown);
       if (this.isDailySafetyStopped(account, now))
@@ -4281,6 +4321,9 @@ export class AccountRotator {
           ? { disabledProviders: [...a.disabledProviders] }
           : {}),
         quota: a.quota,
+        customQuotas: Object.keys(a.config.customQuotas ?? {}).filter((provider) => hasCredential(a.config, provider)).map((providerId) => ({
+          providerId, ...this.getCustomQuota(a, providerId, now)!,
+        })),
         inFlightRequests: a.inFlightRequests,
         inFlightByModel: a.inFlightByModel,
         proDetected: a.config.type === "pro",
@@ -4687,6 +4730,27 @@ export class AccountRotator {
     await removeAccountFromConfig(email);
     await this.saveState();
     this.log(`${email}: account removed`);
+    return true;
+  }
+
+  private getCustomQuota(account: AccountRuntime, providerId: string, now = Date.now()) {
+    const rule = account.config.customQuotas?.[providerId];
+    return rule ? customQuotaSnapshot(rule, this.customQuotaUsage[customQuotaKey(account.config, providerId)], now) : null;
+  }
+
+  async setCustomQuota(accountId: string, providerId: string, rule: CustomQuotaRule | null): Promise<boolean> {
+    const matches = this.accounts.filter((account) => getAccountIdentity(account) === accountId);
+    if (matches.length !== 1 || !hasCredential(matches[0].config, providerId) || (rule !== null && !isCustomQuotaRule(rule))) return false;
+    const account = matches[0];
+    const customQuotas = { ...account.config.customQuotas };
+    if (rule) customQuotas[providerId] = { ...rule };
+    else delete customQuotas[providerId];
+    const nextConfig = { ...this.config, accounts: this.config.accounts.map((config) =>
+      getAccountIdentity(config) === accountId ? { ...config, customQuotas } : config) };
+    await saveAccountsConfig(nextConfig);
+    this.config = nextConfig;
+    account.config = { ...account.config, customQuotas };
+    this.requestWaiterDrain();
     return true;
   }
 

@@ -1,7 +1,7 @@
 // Typed client for the admin API. Auth rides on the HttpOnly session cookie,
 // so no token is ever handled in page JavaScript.
 
-import type { AccountTier, Config, SpendLog, VirtualKey } from "../../types.js";
+import type { CustomQuotaRule, AccountTier, Config, SpendLog, VirtualKey } from "../../types.js";
 import type {
   ActivityResponse,
   DashboardSnapshot,
@@ -173,6 +173,8 @@ export const api = {
       allowNotOk: true,
     }),
 
+  setCustomQuota: (accountId: string, providerId: string, rule: CustomQuotaRule | null) =>
+    request<{ ok: true }>("PUT", `/api/custom-quota/${enc(accountId)}`, { providerId, rule }),
   config: () => request<Config>("GET", "/api/config"),
   saveConfig: (config: unknown) => request<{ ok: true }>("PUT", "/api/config", config),
   importConfig: (config: unknown) =>

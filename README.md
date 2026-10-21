@@ -38,6 +38,9 @@ login, account-specific Qwen discovery and a single current DeepSeek model, with
 boolean thinking and streaming/tool compatibility. See
 [setup, validation and current limits](docs/qwen-deepseek-app.md).
 
+Accounts also support optional [local request budgets](docs/custom-quotas.md), with
+persistent counters and automatic account switching when a configured budget runs out.
+
 ## Naming and compatibility
 
 The preferred command is `lyod-rotator`. The `tuxevil-rotator` and

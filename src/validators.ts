@@ -1,3 +1,4 @@
+import { isCustomQuotaRule } from "./custom-quota.js";
 import { webAppProvider } from "./providers/web-app/credentials.js";
 import { isClaudeAppModel } from "./providers/claude-app/credentials.js";
 import { isAbsolute } from "node:path";
@@ -137,6 +138,14 @@ export function validateAccountConfig(value: unknown, path = "account"): Validat
 	if (value.type !== undefined && value.type !== "pro" && value.type !== "free") errors.push(`${path}.type must be "pro" or "free"`);
 	if (value.tier !== undefined && !["ultra", "pro", "plus", "free", "unknown", "max", "team"].includes(String(value.tier))) {
 		errors.push(`${path}.tier must be "ultra", "pro", "plus", "free", "unknown", "max", or "team"`);
+	}
+	if (value.customQuotas !== undefined) {
+		if (!isRecord(value.customQuotas)) errors.push(`${path}.customQuotas must be an object`);
+		else for (const [provider, rule] of Object.entries(value.customQuotas)) {
+			if (!PROVIDER_ORDER.includes(provider) || !isCustomQuotaRule(rule)) {
+				errors.push(`${path}.customQuotas.${provider}: expected a known provider, positive integer requests and windowHours (1–8760)`);
+			}
+		}
 	}
 	if (value.familyManager !== undefined && typeof value.familyManager !== "boolean") errors.push(`${path}.familyManager must be a boolean`);
 

@@ -62,7 +62,27 @@ export interface ProviderCredential {
   proxyUrl?: string;
 }
 
+export interface CustomQuotaRule {
+  requests: number;
+  windowHours: number;
+}
+
+export interface CustomQuotaUsage {
+  used: number;
+  startedAt: number;
+  windowHours: number;
+}
+
+export interface CustomQuotaStatus extends CustomQuotaRule {
+  providerId: string;
+  used: number;
+  resetAt: number | null;
+  percentRemaining: number;
+}
+
 export interface AccountConfig {
+  /** Optional operator budgets, independent of upstream quota reports. */
+  customQuotas?: Record<string, CustomQuotaRule>;
   email: string;
   /**
    * Per-provider credentials. The account (email) is the parent entity and
@@ -597,6 +617,8 @@ export interface PersistedDynamicModelOwnership {
 }
 
 export interface PersistedState {
+  customQuotaUsage?: Record<string, CustomQuotaUsage>;
+
   // Historical dynamic model IDs mapped to their shared quota pools.
   dynamicModelQuotaPools?: Record<string, string>;
   // Exact account ownership for dynamically discovered model IDs.
@@ -720,6 +742,8 @@ export interface StatusResponse {
 }
 
 export interface AccountStatus {
+  customQuotas?: CustomQuotaStatus[];
+
   /** Stable account identity for exact Models-page targets; email is a legacy fallback. */
   id?: string;
   email: string;

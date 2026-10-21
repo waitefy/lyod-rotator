@@ -1,3 +1,4 @@
+import { isCustomQuotaRule } from "./custom-quota.js";
 // HTTP reverse proxy - forwards requests to Antigravity with credential rotation
 
 import {
@@ -2537,6 +2538,26 @@ export function startProxy(
     if (method === "GET" && pathname === "/api/status") {
       if (!requireAdmin(req, res)) return;
       serveStatusApi(res, rotator);
+      return;
+    }
+
+    if (method === "PUT" && pathname.startsWith("/api/custom-quota/")) {
+      if (!requireAdmin(req, res)) return;
+      void readJsonRequest(req).then(async (body) => {
+        const { providerId, rule } = (body ?? {}) as { providerId?: unknown; rule?: unknown };
+        if (typeof providerId !== "string" || (rule !== null && !isCustomQuotaRule(rule))) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Expected providerId and rule: { requests: positive integer, windowHours: integer 1–8760 }, or null to disable" }));
+          return;
+        }
+        const accountId = decodeURIComponent(pathname.slice("/api/custom-quota/".length));
+        const ok = await rotator.setCustomQuota(accountId, providerId, rule);
+        res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok, ...(ok ? {} : { error: "Account or provider not found" }) }));
+      }).catch((error) => {
+        res.writeHead(error instanceof PayloadTooLargeError ? 413 : 400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Unable to save local request budget" }));
+      });
       return;
     }
 

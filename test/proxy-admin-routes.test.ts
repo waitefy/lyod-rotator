@@ -65,6 +65,29 @@ describe("proxy admin routes", () => {
     }
   });
 
+  it("protects custom budgets, validates input and targets an exact account identity", async () => {
+    const { rotator } = makeRotator();
+    const calls: unknown[][] = [];
+    const customRotator = { ...rotator, async setCustomQuota(...args: unknown[]) {
+      calls.push(args);
+      return args[0] !== "missing";
+    } };
+    server = await startTestProxy(customRotator);
+    const port = (server.address() as AddressInfo).port;
+    const accountId = "test@example.com#qwen-app:::test";
+    const url = `http://127.0.0.1:${port}/api/custom-quota/${encodeURIComponent(accountId)}`;
+    const options = (rule: unknown) => ({ method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ providerId: "qwen-app", rule }) });
+    assert.equal((await fetch(url, options({ requests: 5, windowHours: 24 }))).status, 401);
+    assert.equal((await fetch(url + "?token=secret", options({ requests: 0, windowHours: 24 }))).status, 400);
+    assert.equal(calls.length, 0);
+    assert.equal((await fetch(url + "?token=secret", options({ requests: 5, windowHours: 24 }))).status, 200);
+    assert.deepEqual(calls[0], [accountId, "qwen-app", { requests: 5, windowHours: 24 }]);
+    assert.equal((await fetch(url + "?token=secret", options(null))).status, 200);
+    assert.deepEqual(calls[1], [accountId, "qwen-app", null]);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/custom-quota/missing?token=secret`, options(null))).status, 404);
+  });
+
   it("matches dynamic admin routes by pathname while preserving query-token auth", async () => {
     const { rotator, state } = makeRotator();
     server = await startTestProxy(rotator);
