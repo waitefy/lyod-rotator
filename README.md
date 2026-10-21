@@ -29,10 +29,14 @@ This fork was previously named **tuxevil-rotator-argon**.
 An experimental **ChatGPT App bridge** is available as an optional, separately
 configured chat2api sidecar; see [setup and validation boundaries](docs/chatgpt-app.md).
 
-An experimental **Claude App bridge** adds a separate local Firefox login and
-`claude-app-auto` for free accounts; see [setup and current boundaries](docs/claude-app.md).
-Browser login and production account verification are pending. Claude App is
-planned and **not implemented**. The existing OpenAI Codex provider remains separate.
+An experimental **Claude App bridge** uses isolated Firefox profiles and account-specific
+model/effort discovery; see [setup and current boundaries](docs/claude-app.md).
+The existing OpenAI Codex provider remains separate.
+
+**Qwen App and DeepSeek App bridges** add separate account pools, verified Firefox
+login, account-specific Qwen discovery and a single current DeepSeek model, with
+boolean thinking and streaming/tool compatibility. See
+[setup, validation and current limits](docs/qwen-deepseek-app.md).
 
 ## Naming and compatibility
 

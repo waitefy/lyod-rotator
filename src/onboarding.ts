@@ -1,3 +1,4 @@
+import { accountFromSessionFile as webAccountFromSessionFile } from "./providers/web-app/credentials.js";
 import { accountFromSessionFile as claudeAccountFromSessionFile } from "./providers/claude-app/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfiguredAdminToken } from "./admin-auth.js";
@@ -442,6 +443,8 @@ export function serveCliLogin(
   <button class="tab" data-panel="panel-gemini-web">Gemini App</button>
   <button class="tab" data-panel="panel-chatgpt-app">ChatGPT App</button>
   <button class="tab" data-panel="panel-claude-app">Claude App</button>
+  <button class="tab" data-panel="panel-qwen-app">Qwen App</button>
+  <button class="tab" data-panel="panel-deepseek-app">DeepSeek App</button>
   <button class="tab" data-panel="panel-codex">OpenAI Codex</button>
   <button class="tab" data-panel="panel-ollama">Ollama Cloud</button>
   <button class="tab" data-panel="panel-zen">OpenCode Zen</button>
@@ -563,6 +566,102 @@ document.getElementById('claudeAppForm').addEventListener('submit', async (event
     });
     const data = await response.json();
     result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Connectivity and model access are not verified yet.' : data.error;
+  } catch { result.textContent = 'Unable to save bridge connection'; }
+  finally { button.disabled = false; }
+});
+</script>
+</details>
+</div>
+
+<div class="panel" id="panel-qwen-app">
+<h3>Sign in to Qwen App</h3>
+<p>Open the local login helper, sign in to Qwen in its separate Firefox window,
+then close that window. The helper checks your account and saves the connection automatically.</p>
+<a class="cta" id="qwen-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
+<div class="note">Requires the Qwen App login helper installed on this PC.
+Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
+With server registration configured in the helper, the account is connected automatically.
+Only models returned by your account are listed. Thinking is an on/off option where supported.</div>
+<script>
+(() => {
+  const button = document.getElementById('qwen-connect');
+  const link = new URL('lyod-qwen://login');
+  link.searchParams.set('origin', location.origin);
+  if (button.dataset.account) link.searchParams.set('account', button.dataset.account);
+  button.href = link.href;
+})();
+</script>
+<details style="margin-top:24px"><summary>Advanced: register an existing bridge with this rotator</summary>
+<p>Create a private (0600) JSON on the rotator host with provider, email, accountId, baseUrl, the bridge apiKey and availableModels.
+Enter its absolute path below. Web access tokens stay in the sidecar.</p>
+<form id="qwenAppForm">
+  <input name="sessionFile" required placeholder="/sessions/qwen-app.json" style="width:100%;padding:12px" />
+  <button class="cta" type="submit" style="margin-top:12px">Save bridge connection</button>
+  <p id="qwenAppResult" role="status"></p>
+</form>
+<script>
+document.getElementById('qwenAppForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  const result = document.getElementById('qwenAppResult');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/cli-login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'qwen-app', sessionFile: form.elements.sessionFile.value.trim() })
+    });
+    const data = await response.json();
+    result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Bridge identity and model catalog checked.' : data.error;
+  } catch { result.textContent = 'Unable to save bridge connection'; }
+  finally { button.disabled = false; }
+});
+</script>
+</details>
+</div>
+
+<div class="panel" id="panel-deepseek-app">
+<h3>Sign in to DeepSeek App</h3>
+<p>Open the local login helper, sign in to DeepSeek in its separate Firefox window,
+then close that window. The helper checks your account and saves the connection automatically.</p>
+<a class="cta" id="deepseek-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
+<div class="note">Requires the DeepSeek App login helper installed on this PC.
+Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
+With server registration configured in the helper, the account is connected automatically.
+Only models returned by your account are listed. Thinking is an on/off option where supported.</div>
+<script>
+(() => {
+  const button = document.getElementById('deepseek-connect');
+  const link = new URL('lyod-deepseek://login');
+  link.searchParams.set('origin', location.origin);
+  if (button.dataset.account) link.searchParams.set('account', button.dataset.account);
+  button.href = link.href;
+})();
+</script>
+<details style="margin-top:24px"><summary>Advanced: register an existing bridge with this rotator</summary>
+<p>Create a private (0600) JSON on the rotator host with provider, email, accountId, baseUrl, the bridge apiKey and availableModels.
+Enter its absolute path below. Web access tokens stay in the sidecar.</p>
+<form id="deepseekAppForm">
+  <input name="sessionFile" required placeholder="/sessions/deepseek-app.json" style="width:100%;padding:12px" />
+  <button class="cta" type="submit" style="margin-top:12px">Save bridge connection</button>
+  <p id="deepseekAppResult" role="status"></p>
+</form>
+<script>
+document.getElementById('deepseekAppForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  const result = document.getElementById('deepseekAppResult');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/cli-login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'deepseek-app', sessionFile: form.elements.sessionFile.value.trim() })
+    });
+    const data = await response.json();
+    result.textContent = data.ok ? 'Connection saved for ' + data.email + '. Bridge identity and model catalog checked.' : data.error;
   } catch { result.textContent = 'Unable to save bridge connection'; }
   finally { button.disabled = false; }
 });
@@ -926,10 +1025,12 @@ export async function handleCliLoginApi(
 
   const provider = body.provider || "google-antigravity";
 
-  if (provider === "chatgpt-app" || provider === "claude-app") {
+  if (provider === "chatgpt-app" || provider === "claude-app" || provider === "qwen-app" || provider === "deepseek-app") {
     let entry: AccountConfig;
     try {
-      entry = await (provider === "claude-app" ? claudeAccountFromSessionFile : accountFromSessionFile)(typeof body.sessionFile === "string" ? body.sessionFile : "");
+      const path = typeof body.sessionFile === "string" ? body.sessionFile : "";
+      entry = provider === "qwen-app" || provider === "deepseek-app" ? await webAccountFromSessionFile(path, provider)
+        : await (provider === "claude-app" ? claudeAccountFromSessionFile : accountFromSessionFile)(path);
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "A private App bridge session JSON is required; see the provider documentation" }));
@@ -938,7 +1039,7 @@ export async function handleCliLoginApi(
     const { isNew } = await addAccountToConfig(entry);
     await rotator.addOrUpdateAccount(entry);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, email: entry.email, isNew, verified: false }));
+    res.end(JSON.stringify({ ok: true, email: entry.email, isNew, verified: provider === "qwen-app" || provider === "deepseek-app" }));
     return;
   }
 

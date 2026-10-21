@@ -31,7 +31,7 @@ export function getProviderCredentialDetails(
   const projectId = getProviderProjectId(norm, provider);
   let providerAccountId = cred?.providerAccountId || "";
   let secret = cred?.refreshToken || cred?.apiKey || "";
-  if (provider === "chatgpt-app" || provider === "claude-app") secret = cred?.sessionFile || "";
+  if (provider === "chatgpt-app" || provider === "claude-app" || provider === "qwen-app" || provider === "deepseek-app") secret = cred?.sessionFile || "";
   if (provider === "gemini-web") secret = cred?.cookiesFile || "";
 
   if (provider === "google-antigravity") {

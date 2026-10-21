@@ -71,8 +71,19 @@ def validate(remote, connection):
     return host, url.port, port
 
 
+def systemctl_user(*args, timeout=30):
+    """CLI sandboxes may need systemd's host user-bus transport."""
+    result = subprocess.run(['systemctl', '--user', *args], capture_output=True, timeout=timeout)
+    if result.returncode and b'Failed to connect' in result.stderr:
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+        result = subprocess.run(['systemctl', '--user', '--machine=' + user + '@.host', *args], capture_output=True, timeout=timeout)
+    result.check_returncode()
+    return result
+
+
 def register(remote, connection, unit_dir=None, provider='chatgpt-app'):
-    if provider not in ('chatgpt-app', 'claude-app'):
+    if provider not in ('chatgpt-app', 'claude-app', 'qwen-app', 'deepseek-app'):
         raise ValueError('Unsupported bridge provider')
     host, local_port, remote_port = validate(remote, connection)
     digest = hashlib.sha256(connection['email'].casefold().encode()).hexdigest()[:24]
@@ -80,6 +91,8 @@ def register(remote, connection, unit_dir=None, provider='chatgpt-app'):
     session = {key: connection[key] for key in ('email', 'apiKey')}
     if provider == 'claude-app':
         session.update({key: connection[key] for key in ('modelSelection', 'availableModels', 'adminApiKey') if key in connection})
+    if provider in ('qwen-app', 'deepseek-app'):
+        session.update({key: connection[key] for key in ('provider', 'accountId', 'availableModels')})
     session['baseUrl'] = f'http://127.0.0.1:{remote_port}/v1'
     ssh = ['ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host]
     payload = dict(remote=remote, session=session, filename=filename, provider=provider)
@@ -100,7 +113,7 @@ def register(remote, connection, unit_dir=None, provider='chatgpt-app'):
     command = ['/usr/bin/ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
                '-NT', '-R', f'127.0.0.1:{remote_port}:127.0.0.1:{local_port}', host]
-    label = 'Claude App' if provider == 'claude-app' else 'ChatGPT App'
+    label = {'claude-app': 'Claude App', 'chatgpt-app': 'ChatGPT App', 'qwen-app': 'Qwen App', 'deepseek-app': 'DeepSeek App'}[provider]
     content = ('[Unit]\nDescription=' + label + ' private bridge ' + digest[:12] + ' for Lyod Rotator\n'
                'After=network-online.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=' +
                ' '.join(command) + '\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n')
@@ -109,10 +122,10 @@ def register(remote, connection, unit_dir=None, provider='chatgpt-app'):
         temporary = path.with_suffix('.tmp')
         temporary.write_text(content)
         temporary.replace(path)
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, capture_output=True, timeout=15)
-    subprocess.run(['systemctl', '--user', 'enable', '--now', service], check=True, capture_output=True, timeout=30)
+        systemctl_user('daemon-reload', timeout=15)
+    systemctl_user('enable', '--now', service)
     if changed:
-        subprocess.run(['systemctl', '--user', 'restart', service], check=True, capture_output=True, timeout=30)
+        systemctl_user('restart', service)
     call_remote('register')
     return {'registered': True, 'email': connection['email']}
 

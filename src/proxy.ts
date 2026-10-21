@@ -381,7 +381,7 @@ export async function classifyUpstreamResponse(
   modelKey: string,
   providerId = DEFAULT_PROVIDER,
 ): Promise<UpstreamAction> {
-  if ((providerId === "gemini-web" || providerId === "chatgpt-app" || providerId === "claude-app") && !response.ok && response.status !== 429) {
+  if ((providerId === "gemini-web" || providerId === "chatgpt-app" || providerId === "claude-app" || providerId === "qwen-app" || providerId === "deepseek-app") && !response.ok && response.status !== 429) {
     return { kind: "web-error", httpStatus: response.status,
       errorText: await response.text().catch(() => ""), endpoint };
   }
@@ -630,6 +630,8 @@ async function handleUpstreamAccountAction(
       provider.id === "opencode-zen" ||
       provider.id === "chatgpt-app" ||
       provider.id === "claude-app" ||
+      provider.id === "qwen-app" ||
+      provider.id === "deepseek-app" ||
       action.providerResourceExhausted;
     if (
       shouldRetryProviderRateLimit &&

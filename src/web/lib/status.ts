@@ -132,6 +132,8 @@ export const PROVIDER_LABELS: Record<string, string> = {
   "gemini-web": "Gemini App",
   "chatgpt-app": "ChatGPT App",
   "claude-app": "Claude App",
+  "qwen-app": "Qwen App",
+  "deepseek-app": "DeepSeek App",
   "opencode-zen": "OpenCode Zen",
 };
 
@@ -152,6 +154,8 @@ export function quotaProvider(quota: Pick<ModelQuota, "providerId" | "modelKey">
   if (key === "gemini-web" || key.startsWith("gemini-web:")) return "gemini-web";
   if (key === "chatgpt-app") return "chatgpt-app";
   if (key === "claude-app") return "claude-app";
+  if (key.startsWith("qwen-app:")) return "qwen-app";
+  if (key.startsWith("deepseek-app:")) return "deepseek-app";
   if (key === "claude" || key === "gemini") return "google-antigravity";
   if (key === "monthly" || key === "session" || key === "weekly") return "ollama";
   if (key.startsWith("opencode")) return "opencode-zen";

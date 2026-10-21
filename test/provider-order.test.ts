@@ -18,6 +18,8 @@ describe("provider pool and credential ordering", () => {
       "gemini-web",
       "chatgpt-app",
       "claude-app",
+      "qwen-app",
+      "deepseek-app",
     ]);
   });
 

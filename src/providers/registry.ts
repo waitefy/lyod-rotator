@@ -6,6 +6,7 @@
 //   3. Extend AccountConfig in src/types.ts with your credential fields
 //   4. Wire your login flow through `rotator login --provider <id>`
 
+import { qwenAppAdapter, deepseekAppAdapter } from "./web-app/index.js";
 import { geminiWebAdapter } from "./gemini-web/index.js";
 import { claudeAppAdapter } from "./claude-app/index.js";
 import { chatGptAppAdapter } from "./chatgpt-app/index.js";
@@ -47,6 +48,8 @@ const PROVIDERS: Record<string, ProviderAdapter> = {
   "gemini-web": geminiWebAdapter,
   "chatgpt-app": chatGptAppAdapter,
   "claude-app": claudeAppAdapter,
+  "qwen-app": qwenAppAdapter,
+  "deepseek-app": deepseekAppAdapter,
 };
 
 export function getProviderAdapter(providerId: string): ProviderAdapter {
@@ -83,7 +86,7 @@ export function findProviderForModel(
     }
   }
   // Check non-default explicit providers first to prevent Google fallback overlap
-  for (const adapter of [claudeAppAdapter, chatGptAppAdapter, opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, geminiWebAdapter, googleAntigravityAdapter]) {
+  for (const adapter of [qwenAppAdapter, deepseekAppAdapter, claudeAppAdapter, chatGptAppAdapter, opencodeZenAdapter, openaiCodexAdapter, ollamaAdapter, geminiWebAdapter, googleAntigravityAdapter]) {
     if (adapter.ownsModel?.(model, context)) {
       return adapter;
     }

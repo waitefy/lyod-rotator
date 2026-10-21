@@ -79,6 +79,7 @@ export interface ProviderModel {
 export interface ModelListContext {
   ollamaModels: readonly string[];
   codexModels: readonly string[];
+  accounts?: readonly AccountConfig[];
 }
 
 export interface ProviderFeatures {
@@ -104,6 +105,8 @@ export interface ProviderAdapter {
   validateCredentials(config: AccountConfig): Promise<CredentialValidationResult>;
   /** True when the account has valid, usable credentials right now. */
   hasValidCredentials(account: AccountRuntime): boolean;
+  /** Account-specific catalog eligibility, evaluated before routing. */
+  canServeModel?(account: AccountRuntime, poolKey: string): boolean;
 
   // --- Auth lifecycle ---
   /**

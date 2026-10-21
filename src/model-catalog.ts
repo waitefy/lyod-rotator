@@ -29,6 +29,8 @@ export const DEFAULT_PROVIDER_ORDER: readonly string[] = [
   "gemini-web",
   "chatgpt-app",
   "claude-app",
+  "qwen-app",
+  "deepseek-app",
 ];
 
 /** The rotator state the catalog reads. Test stubs may omit any of it. */
@@ -120,6 +122,7 @@ function listFor(source: ModelCatalogSource, settings: ModelSettings): CatalogMo
   const context = {
     ollamaModels: source.getOllamaModels?.() ?? [],
     codexModels: source.getCodexModels?.() ?? [],
+    accounts: source.getConfig?.().accounts ?? [],
   };
   const out: CatalogModel[] = [];
   for (const providerId of settings.order) {

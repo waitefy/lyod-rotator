@@ -101,6 +101,8 @@ export const PROVIDER_ORDER: string[] = [
   "gemini-web",
   "chatgpt-app",
   "claude-app",
+  "qwen-app",
+  "deepseek-app",
 ];
 
 export const PROVIDER_ORDER_RANK: Record<string, number> = {
@@ -111,6 +113,8 @@ export const PROVIDER_ORDER_RANK: Record<string, number> = {
   "gemini-web": 5,
   "chatgpt-app": 6,
   "claude-app": 7,
+  "qwen-app": 8,
+  "deepseek-app": 9,
 };
 
 // Ollama Cloud currently exposes one account-wide usage pool. Keep the old
@@ -125,6 +129,8 @@ export function isOllamaQuotaPoolKey(poolKey: string): boolean {
 }
 
 export function getProviderIdForPoolKey(poolKey: string): string {
+  if (poolKey.startsWith("qwen-app:")) return "qwen-app";
+  if (poolKey.startsWith("deepseek-app:")) return "deepseek-app";
   if (poolKey.startsWith("codex:") || poolKey.startsWith("openai-codex")) return "openai-codex";
   if (poolKey.startsWith("opencode-zen:") || poolKey === "opencode-zen") return "opencode-zen";
   if (isOllamaQuotaPoolKey(poolKey)) return "ollama";

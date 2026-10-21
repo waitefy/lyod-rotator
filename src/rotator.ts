@@ -3290,7 +3290,7 @@ export class AccountRotator {
     const isAccountScopedProvider =
       providerResourceExhausted ||
       (poolKey &&
-        (poolKey.startsWith("opencode-zen") ||
+        (poolKey.startsWith("qwen-app:") || poolKey.startsWith("deepseek-app:") || poolKey.startsWith("opencode-zen") ||
           getProviderIdForPoolKey(poolKey) === "ollama"));
 
     if (isAccountScopedProvider) {
@@ -4005,6 +4005,9 @@ export class AccountRotator {
         reason: "provider-ineligible",
         detail: `account has no ${providerId} credential for this provider pool`,
       };
+    }
+    if (getProviderAdapter(providerId).canServeModel?.(account, modelKey) === false) {
+      return { reason: "provider-ineligible", detail: "selected model is not offered by this account" };
     }
     if (account.invalidProviders?.[providerId]) {
       return {

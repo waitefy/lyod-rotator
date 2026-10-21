@@ -1,3 +1,4 @@
+import { webAppProvider } from "./providers/web-app/credentials.js";
 import { isClaudeAppModel } from "./providers/claude-app/credentials.js";
 import { isAbsolute } from "node:path";
 import { isChatGptAppModel } from "./providers/chatgpt-app/credentials.js";
@@ -61,7 +62,7 @@ function isProviderModelKey(value: string): boolean {
 export function isKnownNonGoogleModel(model: string): boolean {
 	const trimmed = model.trim();
 	if (!trimmed) return false;
-	if (isChatGptAppModel(trimmed) || isClaudeAppModel(trimmed)) return true;
+	if (webAppProvider(trimmed) || isChatGptAppModel(trimmed) || isClaudeAppModel(trimmed)) return true;
 	const lower = trimmed.toLowerCase();
 	if (isCodexRequestModel(trimmed) || getWebThinkingLevel(lower) !== undefined) return true;
 	if (isOpenCodeZenModel(trimmed) || isOpenCodeZenModel(lower)) return true;
@@ -96,7 +97,7 @@ export function validateAccountConfig(value: unknown, path = "account"): Validat
 			if (proxyError) errors.push(`${cpath}.${proxyError}`);
 			if (cred.provider === "ollama" || cred.provider === "opencode-zen") {
 				if (!isNonEmptyString(cred.apiKey)) errors.push(`${cpath}.apiKey must be a non-empty string`);
-			} else if (cred.provider === "chatgpt-app" || cred.provider === "claude-app") {
+			} else if (cred.provider === "chatgpt-app" || cred.provider === "claude-app" || cred.provider === "qwen-app" || cred.provider === "deepseek-app") {
 				if (!isNonEmptyString(cred.sessionFile) || !isAbsolute(cred.sessionFile)) {
 					errors.push(`${cpath}.sessionFile must be an absolute file path`);
 				}
@@ -118,7 +119,7 @@ export function validateAccountConfig(value: unknown, path = "account"): Validat
 		const provider = typeof value.provider === "string" ? value.provider : "google-antigravity";
 		if (provider === "ollama" || provider === "opencode-zen") {
 			if (!isNonEmptyString(value.apiKey)) errors.push(`${path}.apiKey must be a non-empty string`);
-		} else if (provider === "chatgpt-app" || provider === "claude-app") {
+		} else if (provider === "chatgpt-app" || provider === "claude-app" || provider === "qwen-app" || provider === "deepseek-app") {
 			errors.push(`${path}: App providers require credentials with an absolute sessionFile path`);
 		} else if (provider === "gemini-web") {
 			errors.push(`${path}: Gemini Web requires credentials with an absolute cookiesFile path`);

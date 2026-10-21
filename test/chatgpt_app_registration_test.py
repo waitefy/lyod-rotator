@@ -74,6 +74,38 @@ class RegistrationTest(unittest.TestCase):
     def test_embedded_server_script_compiles(self):
         compile(registration.REMOTE, '<server-registration>', 'exec')
 
+    def test_user_bus_fallback_only_for_connection_failure(self):
+        failed = subprocess.CompletedProcess([], 1, stderr=b'Failed to connect to user scope bus')
+        success = subprocess.CompletedProcess([], 0, stderr=b'')
+        with patch.object(registration.subprocess, 'run', side_effect=[failed, success]) as run:
+            registration.systemctl_user('daemon-reload')
+            self.assertEqual(run.call_count, 2)
+            self.assertIn('@.host', run.call_args.args[0][2])
+        denied = subprocess.CompletedProcess([], 1, stderr=b'Access denied')
+        with patch.object(registration.subprocess, 'run', return_value=denied) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                registration.systemctl_user('daemon-reload')
+            self.assertEqual(run.call_count, 1)
+
+    def test_web_providers_transfer_identity_and_catalog_without_website_token(self):
+        for provider in ('qwen-app', 'deepseek-app'):
+            with self.subTest(provider=provider):
+                connection = dict(self.connection, provider=provider, accountId='stable-account',
+                                  availableModels=[dict(id='fixture', name='Fixture', thinking=True, search=False, chat=True)],
+                                  token='website-secret')
+                payloads = []
+                def run(command, **kwargs):
+                    if command[0] == 'ssh':
+                        payloads.append(json.loads(kwargs['input']))
+                        return Mock(stdout=json.dumps({'ok': True, 'email': connection['email']}))
+                    return Mock(returncode=0)
+                with patch.object(registration.subprocess, 'run', side_effect=run):
+                    registration.register(self.remote, connection, self.root, provider=provider)
+                self.assertEqual(payloads[-1]['session']['accountId'], 'stable-account')
+                self.assertEqual(payloads[-1]['session']['provider'], provider)
+                self.assertEqual(payloads[-1]['session']['availableModels'], connection['availableModels'])
+                self.assertNotIn('website-secret', json.dumps(payloads))
+
     def test_claude_keeps_capabilities_and_uses_separate_tunnel_and_descriptor(self):
         connection = dict(self.connection, modelSelection='explicit',
                           availableModels=[{'id': 'claude-sonnet-5-5', 'efforts': ['high']}], adminApiKey='private-admin')
