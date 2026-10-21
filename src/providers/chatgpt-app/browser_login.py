@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from firefox_extensions import install_bitwarden
+from firefox_extensions import install_bitwarden, save_bitwarden
 
 ROOT = Path("~/.config/lyod-rotator/chatgpt-app").expanduser()
 SCHEME = "lyod-chatgpt"
@@ -171,6 +171,7 @@ def firefox_login(profile, fresh=False):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        save_bitwarden(profile)
 
 
 def compose_command(settings):

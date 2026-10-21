@@ -46,6 +46,7 @@ def firefox_login(profile, domain):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        ui.save_bitwarden(profile)
 
 
 def decode_storage(value, conversion, compression):

@@ -69,6 +69,7 @@ def firefox_login(profile, fresh):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        ui.save_bitwarden(profile)
 
 
 def identity(cookies, proxy=None):

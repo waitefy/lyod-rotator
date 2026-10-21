@@ -25,9 +25,14 @@ are preserved. An account without a full unmasked email gets a stable
 All five App login helpers (ChatGPT, Claude, Gemini, Qwen and DeepSeek) reuse a
 locally installed Bitwarden XPI from
 `~/.config/lyod-rotator/browser-extensions/bitwarden.xpi` (or the existing ChatGPT
-profile). Existing extensions are retained. New profiles receive only the signed
-extension package, without copying vault data or Bitwarden authentication from
-another profile; sign into Bitwarden separately in each profile when needed.
+profile). Existing extensions are retained. After the login window closes, the
+helper saves only Bitwarden's extension storage and toolbar placement in the
+private local `browser-extensions/bitwarden-state.zip`. Subsequent login windows
+restore this state, including Bitwarden authentication and pinning, while provider
+cookies remain isolated. Existing closed helper profiles are used for the initial
+migration. Vault timeout and unlock requirements remain controlled by Bitwarden;
+the helper does not disable locking or save a master password. Close one login
+window before starting the next so the latest state is available.
 Login remains available if no local extension package is installed.
 
 Private settings are under `~/.config/lyod-rotator/{qwen-app,deepseek-app}`.

@@ -17,7 +17,7 @@ import urllib.error
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from firefox_extensions import install_bitwarden
+from firefox_extensions import install_bitwarden, save_bitwarden
 
 
 class LoginError(ValueError):
@@ -125,6 +125,7 @@ def browser_login(profile, destination, firefox="firefox"):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        save_bitwarden(profile)
 
 
 REMOTE_INSTALL = r'''
