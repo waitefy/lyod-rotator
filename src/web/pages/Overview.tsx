@@ -5,7 +5,7 @@ import { type JSX } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import type { DashboardOverview } from "../../dashboard-types.js";
 import { buildAttention, SEVERITY_ICON, SEVERITY_TONE, type AttentionAction, type AttentionItem } from "../lib/attention.js";
-import { buildProviderGroups, type ProviderGroup, type ModelPool } from "../lib/pools.js";
+import { buildProviderGroups, summarizeLocalBudgets, type ProviderGroup, type ModelPool } from "../lib/pools.js";
 import { formatClock, formatCompact, formatCount, formatDuration, formatMs, formatUsd, pluralize } from "../lib/format.js";
 import {
   canServe,
@@ -340,7 +340,7 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
   return (
     <Panel
       title="Providers"
-      subtitle="Connected providers and their quota pools across accounts in service, weighted by allowance or tier."
+      subtitle="Service quotas and separately labelled local request budgets across accounts in service."
       flush
     >
       {providers.length === 0 ? (
@@ -364,9 +364,12 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
               </tr>
             </thead>
             <tbody>
-              {providers.flatMap((group) => group.pools.length > 0 ? group.pools.map((pool) => (
-                <PoolRow key={pool.key} pool={pool} expanded={open === pool.key} onToggle={() => setOpen(open === pool.key ? null : pool.key)} />
-              )) : [
+              {providers.flatMap((group) => [
+                ...group.pools.map((pool) => (
+                  <PoolRow key={pool.key} pool={pool} expanded={open === pool.key} onToggle={() => setOpen(open === pool.key ? null : pool.key)} />
+                )),
+                ...(summarizeLocalBudgets(group, now.value) ? [<LocalBudgetRow key={`${group.provider}-local`} group={group} />] : []),
+                ...(group.pools.length === 0 && !summarizeLocalBudgets(group, now.value) ? [
                   <tr key={group.provider}>
                     <th scope="row">{providerLabel(group.provider)}</th>
                     <td colSpan={6} class="muted">
@@ -374,6 +377,7 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
                       {" · Quota unavailable"}
                     </td>
                   </tr>
+                ] : []),
               ])}
             </tbody>
           </table>
@@ -381,6 +385,27 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
       )}
     </Panel>
   );
+}
+
+function LocalBudgetRow({ group }: { group: ProviderGroup }): JSX.Element | null {
+  const budget = summarizeLocalBudgets(group, now.value);
+  if (!budget) return null;
+  return <tr class="pool-row">
+    <th scope="row"><div class="pool-name"><span>{providerLabel(group.provider)}</span><Tag>Local budget</Tag></div></th>
+    <td data-label="Remaining">
+      <div class="pool-capacity">
+        <Meter value={budget.percent} label={`${providerLabel(group.provider)} local request budget remaining`} />
+        <span class="num">{budget.percent}%</span>
+      </div>
+      <div class="cell-sub">{formatCount(budget.remaining)} / {formatCount(budget.limit)} requests remaining</div>
+      <div class="cell-sub">{pluralize(budget.members.length, "account")} with local budget</div>
+    </td>
+    <td colSpan={2} class="muted">Successful requests through this rotator</td>
+    <td data-label="Next reset"><Countdown until={budget.nextResetAt} /></td>
+    <td class="hide-sm muted">—</td>
+    <td class="cell-action"><Button size="sm" variant="ghost" icon="chevronRight" iconOnly
+      onClick={() => navigate(accountPath(budget.members[0].account.email))}>Edit local budget</Button></td>
+  </tr>;
 }
 
 function PoolRow({ pool, expanded, onToggle }: { pool: ModelPool; expanded: boolean; onToggle: () => void }): JSX.Element {

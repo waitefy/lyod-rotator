@@ -221,6 +221,23 @@ export interface ProviderGroup {
   pools: ModelPool[];
 }
 
+/** Operator budgets are request counts, independent of native quota and account tier. */
+export function summarizeLocalBudgets(group: ProviderGroup, now: number) {
+  const members = group.accounts.flatMap((account) => {
+    if (isOutOfService(account) || account.disabledProviders?.includes(group.provider)) return [];
+    const budget = account.customQuotas?.find((entry) => entry.providerId === group.provider);
+    if (!budget) return [];
+    const used = budget.resetAt !== null && budget.resetAt <= now ? 0 : budget.used;
+    return [{ account, budget, remaining: Math.max(0, budget.requests - used) }];
+  });
+  if (!members.length) return null;
+  const limit = members.reduce((sum, entry) => sum + entry.budget.requests, 0);
+  const remaining = members.reduce((sum, entry) => sum + entry.remaining, 0);
+  const resets = members.map((entry) => entry.budget.resetAt).filter((time): time is number => time !== null && time > now);
+  return { members, limit, remaining, percent: Math.floor(100 * remaining / limit),
+    nextResetAt: resets.length ? Math.min(...resets) : null };
+}
+
 /** Connected providers remain visible even before their first successful quota poll. */
 export function buildProviderGroups(overview: DashboardOverview, now: number): ProviderGroup[] {
   const groups = new Map<string, ProviderGroup>();

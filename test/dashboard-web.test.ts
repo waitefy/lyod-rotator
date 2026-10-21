@@ -9,7 +9,7 @@ import { ACCOUNT_FILTERS, matchesQuery, sortAccounts } from "../src/web/lib/acco
 import { modelColor } from "../src/web/lib/colors.js";
 import { formatCompact, formatDuration, formatMs, formatUsd } from "../src/web/lib/format.js";
 import { createMasker } from "../src/web/lib/mask.js";
-import { buildPools, buildProviderGroups, poolKeyForModel } from "../src/web/lib/pools.js";
+import { buildPools, buildProviderGroups, poolKeyForModel, summarizeLocalBudgets } from "../src/web/lib/pools.js";
 import { errorHint, isKickstartable, quotaProvider } from "../src/web/lib/status.js";
 import {
   buildModelRows,
@@ -628,6 +628,38 @@ describe("models page", () => {
 });
 
 describe("overview providers", () => {
+  it("shows local budgets without native quota and weights by actual request limits", () => {
+    const budget = (requests: number, used: number, resetAt: number | null = NOW + H) => ({
+      providerId: "qwen-app", requests, used, resetAt, windowHours: 24, percentRemaining: 0,
+    });
+    const [group] = buildProviderGroups(overview({ accounts: [
+      account("small@x.dev", { provider: "qwen-app", tier: "ultra", customQuotas: [budget(10, 10)] }),
+      account("large@x.dev", { provider: "qwen-app", tier: "free", customQuotas: [budget(90, 0, null)] }),
+      account("expired@x.dev", { provider: "qwen-app", customQuotas: [budget(20, 20, NOW)] }),
+      account("disabled@x.dev", { provider: "qwen-app", status: "disabled", customQuotas: [budget(100, 0)] }),
+      account("off@x.dev", { provider: "qwen-app", disabledProviders: ["qwen-app"], customQuotas: [budget(100, 0)] }),
+      account("unlimited@x.dev", { provider: "qwen-app" }),
+    ] }), NOW);
+    assert.equal(group.pools.length, 0, "local counters must not masquerade as native quota");
+    const summary = summarizeLocalBudgets(group, NOW)!;
+    assert.equal(summary.limit, 120);
+    assert.equal(summary.remaining, 110);
+    assert.equal(summary.percent, 91);
+    assert.equal(summary.members.length, 3);
+    assert.equal(summary.nextResetAt, NOW + H);
+  });
+
+  it("keeps sibling provider budgets separate and handles an unstarted window", () => {
+    const groups = buildProviderGroups(overview({ accounts: [account("shared@x.dev", {
+      provider: "qwen-app+deepseek-app", customQuotas: [{ providerId: "deepseek-app", requests: 60,
+        used: 0, windowHours: 1, resetAt: null, percentRemaining: 100 }],
+    })] }), NOW);
+    assert.equal(summarizeLocalBudgets(groups.find(g => g.provider === "qwen-app")!, NOW), null);
+    const summary = summarizeLocalBudgets(groups.find(g => g.provider === "deepseek-app")!, NOW)!;
+    assert.equal(summary.percent, 100);
+    assert.equal(summary.nextResetAt, null);
+  });
+
   it("includes Ollama without quota and separates quotas by provider on shared accounts", () => {
     const shared = account("shared@x.dev", { provider: "google-antigravity+ollama", quota: [quota("claude", 80)] });
     const groups = buildProviderGroups(overview({ accounts: [shared] }), NOW);
