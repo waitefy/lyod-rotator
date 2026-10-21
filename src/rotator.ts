@@ -1,6 +1,6 @@
 import { bindWebAppAccount } from "./providers/web-app/binding.js";
 import { accountFromSessionFile as verifyWebAccount, getSessionFile as webSessionFile, type WebAppProvider } from "./providers/web-app/credentials.js";
-import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule } from "./custom-quota.js";
+import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule, withInitialCustomQuotas } from "./custom-quota.js";
 import type { CustomQuotaRule, CustomQuotaUsage } from "./types.js";
 import {
   type AccountConfig,
@@ -4630,6 +4630,7 @@ export class AccountRotator {
     const existingIndex = this.accounts.findIndex(
       (account) => account.config.email === accountConfig.email,
     );
+    accountConfig = withInitialCustomQuotas(accountConfig, this.accounts[existingIndex]?.config);
     if (existingIndex >= 0) {
       const existing = this.accounts[existingIndex];
       existing.config = {

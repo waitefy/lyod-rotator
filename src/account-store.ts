@@ -13,6 +13,7 @@ import { applyConfigDefaults, getDefaultConfig } from "./config-defaults.js";
 import { hasCredential, sortAccountCredentials } from "./providers/credential-helpers.js";
 import { normalizeAccountConfig } from "./config-normalize.js";
 import { validateAccountConfig } from "./validators.js";
+import { withInitialCustomQuotas } from "./custom-quota.js";
 
 export {
   loadConfig,
@@ -139,11 +140,12 @@ export async function addAccountToConfig(
   entry: AccountConfig,
 ): Promise<{ isNew: boolean }> {
   validateAccountConfigLengths(entry);
-  const entryNorm = normalizeAccountConfig(entry);
+  let entryNorm = normalizeAccountConfig(entry);
   const config = loadOrCreateAccountsConfig();
   const existing = config.accounts.find(
     (a) => a.email === entryNorm.email || a.email.toLowerCase() === entryNorm.email.toLowerCase(),
   );
+  entryNorm = withInitialCustomQuotas(entryNorm, existing);
   if (existing) {
     assertCodexIdentityCompatible(existing, entryNorm);
     validateCredentialLengths(entryNorm.credentials);

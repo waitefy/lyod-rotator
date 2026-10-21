@@ -2,6 +2,27 @@ import { getAccountIdentity } from "./account-identity.js";
 import { normalizeAccountConfig } from "./config-normalize.js";
 import type { AccountConfig, CustomQuotaRule, CustomQuotaUsage } from "./types.js";
 
+// Operator budgets, not limits reported or guaranteed by the providers.
+const WEB_APP_BUDGETS: Readonly<Record<string, CustomQuotaRule>> = {
+  "chatgpt-app": { requests: 100, windowHours: 5 },
+  "claude-app": { requests: 12, windowHours: 5 },
+  "qwen-app": { requests: 80, windowHours: 24 },
+  "deepseek-app": { requests: 60, windowHours: 1 },
+};
+
+/** Apply defaults only to newly connected providers; re-login preserves disabled budgets. */
+export function withInitialCustomQuotas(incoming: AccountConfig, existing?: AccountConfig): AccountConfig {
+  const quotas = { ...existing?.customQuotas, ...incoming.customQuotas };
+  const connected = new Set(normalizeAccountConfig(existing ?? { email: incoming.email }).credentials?.map((c) => c.provider));
+  for (const credential of incoming.credentials ?? []) {
+    const rule = WEB_APP_BUDGETS[credential.provider];
+    if (rule && !connected.has(credential.provider) && !quotas[credential.provider]) {
+      quotas[credential.provider] = { ...rule };
+    }
+  }
+  return Object.keys(quotas).length ? { ...incoming, customQuotas: quotas } : incoming;
+}
+
 export function isCustomQuotaRule(value: unknown): value is CustomQuotaRule {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const rule = value as CustomQuotaRule;

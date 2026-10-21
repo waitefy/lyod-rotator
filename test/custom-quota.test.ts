@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
-import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule } from "../src/custom-quota.js";
+import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule, withInitialCustomQuotas } from "../src/custom-quota.js";
 import type { AccountConfig, AccountRuntime, CustomQuotaRule } from "../src/types.js";
 
 const directory = mkdtempSync(join(tmpdir(), "custom-quota-"));
@@ -62,6 +62,47 @@ function fixture(rule?: CustomQuotaRule, count = 2) {
 }
 
 describe("operator-defined request budgets", () => {
+  it("persists the first connection budget and exposes it in runtime status", async () => {
+    const store = await import("../src/account-store.js");
+    const { rotator, config } = fixture(undefined, 0);
+    await store.saveAccountsConfig(config);
+    const entry: AccountConfig = { email: "first-connection@example.test", credentials: [
+      { provider: "chatgpt-app", sessionFile: "/not-read/session.json" },
+    ] };
+    await store.addAccountToConfig(entry);
+    assert.deepEqual(store.loadOrCreateAccountsConfig().accounts[0].customQuotas,
+      { "chatgpt-app": { requests: 100, windowHours: 5 } });
+    await rotator.addOrUpdateAccount(entry);
+    const account = rotator.getStatus().accounts.find((a) => a.email === entry.email)!;
+    assert.ok(account.id);
+    assert.equal(account.customQuotas?.find((q) => q.providerId === "chatgpt-app")?.requests, 100);
+    await rotator.setCustomQuota(account.id, "chatgpt-app", null);
+    await store.addAccountToConfig(entry);
+    await rotator.addOrUpdateAccount(entry);
+    assert.deepEqual(store.loadOrCreateAccountsConfig().accounts[0].customQuotas, {});
+    assert.deepEqual(rotator.getStatus().accounts.find((a) => a.email === entry.email)!.customQuotas, []);
+  });
+
+  it("assigns initial web budgets without overwriting edited or disabled budgets on re-login", () => {
+    const expected = {
+      "chatgpt-app": { requests: 100, windowHours: 5 },
+      "claude-app": { requests: 12, windowHours: 5 },
+      "qwen-app": { requests: 80, windowHours: 24 },
+      "deepseek-app": { requests: 60, windowHours: 1 },
+    };
+    for (const [provider, rule] of Object.entries(expected)) {
+      const entry: AccountConfig = { email: "new@example.test", credentials: [{ provider, sessionFile: "/not-read/session.json" }] };
+      assert.deepEqual(withInitialCustomQuotas(entry).customQuotas, { [provider]: rule });
+      assert.equal(withInitialCustomQuotas(entry, entry).customQuotas, undefined);
+      const edited = { [provider]: { requests: 7, windowHours: 2 } };
+      assert.deepEqual(withInitialCustomQuotas(entry, { ...entry, customQuotas: edited }).customQuotas, edited);
+      assert.deepEqual(withInitialCustomQuotas({ ...entry, customQuotas: edited }).customQuotas, edited);
+      const sibling = { "google-antigravity": { requests: 9, windowHours: 1 } };
+      assert.deepEqual(withInitialCustomQuotas(entry, { email: entry.email, customQuotas: sibling }).customQuotas,
+        { ...sibling, [provider]: rule });
+    }
+  });
+
   it("validates positive integer budgets and bounded windows, including config imports", () => {
     const { config } = fixture();
     for (const rule of [null, [], { requests: 0, windowHours: 24 }, { requests: 1.5, windowHours: 24 },
