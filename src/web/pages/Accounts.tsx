@@ -6,7 +6,7 @@ import type { JSX } from "preact";
 import { memo } from "preact/compat";
 import { useMemo } from "preact/hooks";
 import type { DashboardAccount } from "../../dashboard-types.js";
-import type { ModelQuota } from "../../types.js";
+import type { CustomQuotaStatus, ModelQuota } from "../../types.js";
 import {
   ACCOUNT_FILTERS,
   isAccountFilter,
@@ -359,7 +359,7 @@ const AccountRow = memo(function AccountRow({
         <StatusDetail account={account} maxConcurrent={maxConcurrent} />
       </td>
       <td>
-        {pools.length === 0 ? (
+        {pools.length === 0 && !account.customQuotas?.length ? (
           <span class="muted">No data yet</span>
         ) : (
           <div class="mini-pools">
@@ -371,6 +371,8 @@ const AccountRow = memo(function AccountRow({
               </div>
             ))}
             {pools.length > 3 && <span class="cell-sub">+{pools.length - 3} more</span>}
+            {Boolean(account.customQuotas?.length) && <span class="cell-sub">Local budgets</span>}
+            {account.customQuotas?.map((budget) => <LocalBudgetQuota key={budget.providerId} budget={budget} compact />)}
           </div>
         )}
       </td>
@@ -461,7 +463,7 @@ const AccountCard = memo(function AccountCard({
 
       <CardStatus account={account} maxConcurrent={maxConcurrent} />
 
-      {pools.length === 0 ? (
+      {pools.length === 0 && !account.customQuotas?.length ? (
         <p class="card-quotas-empty">No quota reported yet.</p>
       ) : (
         <ul class="card-quotas">
@@ -473,6 +475,8 @@ const AccountCard = memo(function AccountCard({
               <Link href={href}>+{pools.length - CARD_QUOTAS} more</Link>
             </li>
           )}
+          {Boolean(account.customQuotas?.length) && <li class="card-quotas-more">Local budgets</li>}
+          {account.customQuotas?.map((budget) => <LocalBudgetQuota key={budget.providerId} budget={budget} />)}
         </ul>
       )}
 
@@ -526,6 +530,22 @@ function CardStatus({ account, maxConcurrent }: { account: DashboardAccount; max
   }
   const detail = StatusDetail({ account, maxConcurrent });
   return detail ? <div class="card-status">{detail}</div> : null;
+}
+
+function LocalBudgetQuota({ budget, compact = false }: { budget: CustomQuotaStatus; compact?: boolean }): JSX.Element {
+  const expired = budget.resetAt !== null && budget.resetAt <= now.value;
+  const percent = expired ? 100 : Math.trunc(budget.percentRemaining);
+  const used = expired ? 0 : budget.used;
+  const name = providerLabel(budget.providerId);
+  const Element = compact ? "div" : "li";
+  return <Element class={compact ? "mini-pool" : "card-quota"}
+    title={`${name} local budget: ${used} / ${budget.requests} requests used · ${budget.windowHours}h window`}>
+    <span class={compact ? "mini-pool-name" : "card-quota-name"}>{name}</span>
+    <Meter value={percent} label={`${name} local request budget`} size={compact ? "sm" : "md"} />
+    <span class={compact ? "num" : "card-quota-pct num"}>{percent}%</span>
+    {!compact && <span class="card-quota-when">{budget.resetAt !== null && !expired
+      ? <Countdown until={budget.resetAt} /> : "—"}</span>}
+  </Element>;
 }
 
 function CardQuota({ account, quota, inactive }: { account: DashboardAccount; quota: ModelQuota; inactive: boolean }): JSX.Element {
