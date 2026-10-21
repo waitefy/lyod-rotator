@@ -47,7 +47,7 @@ if payload['phase']=='register':
     with opener.open(req,timeout=30) as r:
         result=json.load(r)
         assert r.status==200 and result.get('ok') is True
-        assert result['email'].casefold()==session['email'].casefold()
+        assert result.get('providerEmail', result['email']).casefold()==session['email'].casefold()
 print(json.dumps({'ok':True,'email':session['email']}))
 '''
 

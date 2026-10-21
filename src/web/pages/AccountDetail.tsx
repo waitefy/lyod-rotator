@@ -2,6 +2,7 @@
 
 import type { JSX } from "preact";
 import { CustomQuotas } from "./CustomQuotas.js";
+import { AccountBinding } from "./AccountBinding.js";
 import type { AccountTier, ModelQuota } from "../../types.js";
 import type { DashboardAccount, DashboardOverview } from "../../dashboard-types.js";
 import { formatCount, formatUsd } from "../lib/format.js";
@@ -105,6 +106,7 @@ export function AccountDetail({ email, onClose }: { email: string; onClose: () =
       {account.lastError && <ErrorBlock message={account.lastError} />}
 
       <ProviderProblems account={account} />
+      <AccountBinding key={account.id ?? account.email} account={account} accounts={data.accounts} onLinked={onClose} />
       <CustomQuotas key={account.id ?? account.email} account={account} />
 
       <section class="detail-section">

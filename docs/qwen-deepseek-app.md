@@ -36,6 +36,15 @@ window before starting the next so the latest state is available.
 Login remains available if no local extension package is installed.
 
 Private settings are under `~/.config/lyod-rotator/{qwen-app,deepseek-app}`.
+
+If DeepSeek returns no full email, its technical identity can be linked to an
+existing account card: open the technical card in the dashboard, choose
+**Link to an existing account**, select your account, and click **Link DeepSeek App**.
+The bridge's authenticated account ID is verified before moving the connection.
+Other providers are preserved; an empty technical card is removed. A conflicting
+DeepSeek connection or active request prevents linking. Later logins keep the
+binding by provider ID, even when the upstream email is hidden.
+
 The installer reuses an existing Claude helper's **remote registration settings**,
 not its credentials. On a new installation configure the same `remote` object
 as described in [Claude setup](claude-app.md). Without it, a local bridge is saved

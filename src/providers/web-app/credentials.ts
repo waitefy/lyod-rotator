@@ -27,6 +27,22 @@ export function webAppProvider(model: string): WebAppProvider | undefined {
 export function getSessionFile(config: AccountConfig, provider: WebAppProvider): string | undefined {
   return getCredential(config, provider)?.sessionFile;
 }
+export function sessionMatchesAccount(session: WebAppSession, config: AccountConfig): boolean {
+  const credential = getCredential(config, session.provider);
+  return credential?.providerAccountId ? credential.providerAccountId === session.accountId
+    : session.email.toLowerCase() === config.email.toLowerCase();
+}
+
+export function registeredAccountEmail(entry: AccountConfig, accounts: readonly AccountConfig[], provider: WebAppProvider): string {
+  const credential = getCredential(entry, provider);
+  const matches = accounts.filter((account) => {
+    const previous = getCredential(account, provider);
+    return previous && ((Boolean(credential?.providerAccountId) && previous.providerAccountId === credential?.providerAccountId) ||
+      (Boolean(credential?.sessionFile) && previous.sessionFile === credential?.sessionFile));
+  });
+  if (matches.length > 1) throw new Error("Ambiguous web account binding");
+  return matches[0]?.email ?? entry.email;
+}
 export function parseModels(value: unknown): WebAppModel[] {
   if (!Array.isArray(value) || value.length > 512) throw new Error("Invalid web model catalog");
   const seen = new Set<string>();
@@ -65,7 +81,7 @@ export function setCatalog(session: WebAppSession, models: WebAppModel[]): void 
 export function accountModels(config: AccountConfig, provider: WebAppProvider): WebAppModel[] {
   try {
     const session = readSession(getSessionFile(config, provider), provider);
-    if (session.email.toLowerCase() !== config.email.toLowerCase()) return [];
+    if (!sessionMatchesAccount(session, config)) return [];
     const cached = catalogs.get(`${provider}:${session.accountId}`);
     return cached ? (Date.now() - cached.at < 600_000 ? cached.models : []) : session.availableModels;
   } catch { return []; }
@@ -82,5 +98,5 @@ export async function accountFromSessionFile(path: string, provider: WebAppProvi
   const catalog = await response.json() as { accountId?: string; data?: unknown };
   if (catalog.accountId !== session.accountId) throw new Error(`${provider} bridge identity mismatch`);
   setCatalog(session, parseModels(catalog.data));
-  return { email: session.email, credentials: [{ provider, sessionFile: path }] };
+  return { email: session.email, credentials: [{ provider, sessionFile: path, providerAccountId: session.accountId }] };
 }

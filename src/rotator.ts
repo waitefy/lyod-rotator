@@ -1,3 +1,5 @@
+import { bindWebAppAccount } from "./providers/web-app/binding.js";
+import { accountFromSessionFile as verifyWebAccount, getSessionFile as webSessionFile, type WebAppProvider } from "./providers/web-app/credentials.js";
 import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule } from "./custom-quota.js";
 import type { CustomQuotaRule, CustomQuotaUsage } from "./types.js";
 import {
@@ -4456,7 +4458,23 @@ export class AccountRotator {
     return redactTypeSafeRoutingInConfig(this.getConfig());
   }
 
-  async replaceConfig(nextConfig: Config): Promise<void> {
+  async linkWebAppAccount(sourceId: string, targetId: string, provider: WebAppProvider): Promise<void> {
+    const source = this.accounts.find((account) => getAccountIdentity(account) === sourceId);
+    if (!source) throw new Error("Account not found");
+    const verified = await verifyWebAccount(webSessionFile(source.config, provider) ?? "", provider);
+    if (this.accounts.some((account) => [sourceId, targetId].includes(getAccountIdentity(account)) && account.inFlightRequests > 0)) {
+      throw new Error("Wait for active requests to finish before linking accounts");
+    }
+    const targetEmail = this.accounts.find((account) => getAccountIdentity(account) === targetId)?.config.email;
+    const next = bindWebAppAccount(this.getConfig(), sourceId, targetId, provider, verified);
+    const target = next.accounts.find((account) => account.email === targetEmail)!;
+    const oldUsage = this.customQuotaUsage[customQuotaKey(source.config, provider)];
+    const newKey = customQuotaKey(target, provider);
+    if (oldUsage && !this.customQuotaUsage[newKey]) this.customQuotaUsage[newKey] = { ...oldUsage };
+    await this.replaceConfig(next, true);
+  }
+
+  async replaceConfig(nextConfig: Config, replaceCredentials = false): Promise<void> {
     const normalized = applyConfigDefaults(nextConfig);
     const incomingTypeSafe = normalized.typesafeRouting;
     const existingTypeSafe = this.config.typesafeRouting;
@@ -4488,7 +4506,7 @@ export class AccountRotator {
         existing.config = {
           ...existing.config,
           ...config,
-          credentials: mergeCredentials(existing.config.credentials, config.credentials),
+          credentials: replaceCredentials ? config.credentials : mergeCredentials(existing.config.credentials, config.credentials),
         };
         return existing;
       }
@@ -4505,7 +4523,7 @@ export class AccountRotator {
         existing.config = {
           ...existing.config,
           ...config,
-          credentials: mergeCredentials(existing.config.credentials, config.credentials),
+          credentials: replaceCredentials ? config.credentials : mergeCredentials(existing.config.credentials, config.credentials),
         };
         return existing;
       }

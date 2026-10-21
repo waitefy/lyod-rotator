@@ -65,6 +65,21 @@ describe("proxy admin routes", () => {
     }
   });
 
+  it("protects account linking and forwards exact identities only for supported providers", async () => {
+    const { rotator } = makeRotator();
+    const calls: unknown[][] = [];
+    server = await startTestProxy({ ...rotator, async linkWebAppAccount(...args: unknown[]) { calls.push(args); } });
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}/api/link-web-account`;
+    const options = (providerId: string) => ({ method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceId: "source#id", targetId: "target#id", providerId }) });
+    assert.equal((await fetch(url, options("deepseek-app"))).status, 401);
+    assert.equal((await fetch(url + "?token=secret", options("chatgpt-app"))).status, 400);
+    assert.equal(calls.length, 0);
+    assert.equal((await fetch(url + "?token=secret", options("deepseek-app"))).status, 200);
+    assert.deepEqual(calls, [["source#id", "target#id", "deepseek-app"]]);
+  });
+
   it("protects custom budgets, validates input and targets an exact account identity", async () => {
     const { rotator } = makeRotator();
     const calls: unknown[][] = [];

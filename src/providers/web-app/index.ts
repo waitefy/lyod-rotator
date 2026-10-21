@@ -4,7 +4,7 @@ import type { ProviderAdapter } from "../adapter.js";
 import { fetchWithHeadersTimeout } from "../../fetch-with-retry.js";
 import { OpenCodeZenSseAccumulator } from "../opencode-zen/forward.js";
 import { accountFromSessionFile, accountModels, getSessionFile, listedModels, parseModels, readSession,
-  setCatalog, type WebAppProvider } from "./credentials.js";
+  setCatalog, sessionMatchesAccount, type WebAppProvider } from "./credentials.js";
 
 export function createWebAppAdapter(provider: WebAppProvider): ProviderAdapter {
   const error = (status: number, message: string, headers?: Headers) => ({ endpoint: provider,
@@ -18,7 +18,12 @@ export function createWebAppAdapter(provider: WebAppProvider): ProviderAdapter {
       finally { rl.close(); }
     },
     async validateCredentials(config) {
-      try { await accountFromSessionFile(getSessionFile(config, provider) ?? "", provider); return { ok: true }; }
+      try {
+        const path = getSessionFile(config, provider) ?? "";
+        await accountFromSessionFile(path, provider);
+        if (!sessionMatchesAccount(readSession(path, provider), config)) throw new Error();
+        return { ok: true };
+      }
       catch { return { ok: false, status: 0, error: `${provider} session or bridge unavailable` }; }
     },
     hasValidCredentials: (account) => Boolean(getSessionFile(account.config, provider)),
@@ -32,7 +37,7 @@ export function createWebAppAdapter(provider: WebAppProvider): ProviderAdapter {
       let session;
       try {
         session = readSession(getSessionFile(account.config, provider), provider);
-        if (session.email.toLowerCase() !== account.config.email.toLowerCase()) throw new Error();
+        if (!sessionMatchesAccount(session, account.config)) throw new Error();
         const response = await fetch(`${session.baseUrl}/models`, { headers: { Authorization: `Bearer ${session.apiKey}` },
           signal: AbortSignal.timeout(15_000), redirect: "error" });
         if (!response.ok) { await response.body?.cancel(); throw new Error(); }
@@ -48,7 +53,7 @@ export function createWebAppAdapter(provider: WebAppProvider): ProviderAdapter {
       let session;
       try {
         session = readSession(getSessionFile(account.config, provider), provider);
-        if (session.email.toLowerCase() !== account.config.email.toLowerCase()) throw new Error();
+        if (!sessionMatchesAccount(session, account.config)) throw new Error();
       } catch { return error(401, `${provider} private session unavailable`); }
       const model = accountModels(account.config, provider).find((entry) => entry.chat && `${provider}-${entry.id}` === body.model);
       if (!model) return error(404, "Selected model is not offered by this account; no fallback was used");

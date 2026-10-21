@@ -1,4 +1,4 @@
-import { accountFromSessionFile as webAccountFromSessionFile } from "./providers/web-app/credentials.js";
+import { accountFromSessionFile as webAccountFromSessionFile, registeredAccountEmail, readSession, getSessionFile } from "./providers/web-app/credentials.js";
 import { accountFromSessionFile as claudeAccountFromSessionFile } from "./providers/claude-app/credentials.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfiguredAdminToken } from "./admin-auth.js";
@@ -387,6 +387,11 @@ export function serveCliLogin(
   }
   pruneCliSessions();
   const currentTypeSafe = configSource?.getConfig().typesafeRouting;
+  const providerLoginEmail = (provider: "qwen-app" | "deepseek-app") => {
+    const config = configSource?.getConfig().accounts.find((entry) => entry.email === account);
+    try { return config ? readSession(getSessionFile(config, provider), provider).email : account; }
+    catch { return account; }
+  };
   const typeSafeConfigured = Boolean(currentTypeSafe?.apiKey);
   const typeSafeModel = currentTypeSafe?.model || "jev-latest";
   const { verifier, challenge } = generatePkce();
@@ -577,7 +582,7 @@ document.getElementById('claudeAppForm').addEventListener('submit', async (event
 <h3>Sign in to Qwen App</h3>
 <p>Open the local login helper, sign in to Qwen in its separate Firefox window,
 then close that window. The helper checks your account and saves the connection automatically.</p>
-<a class="cta" id="qwen-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<a class="cta" id="qwen-connect" data-account="${escapeHtml(providerLoginEmail("qwen-app"))}">Open Firefox</a>
 <p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
 <div class="note">Requires the Qwen App login helper installed on this PC.
 Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
@@ -625,7 +630,7 @@ document.getElementById('qwenAppForm').addEventListener('submit', async (event) 
 <h3>Sign in to DeepSeek App</h3>
 <p>Open the local login helper, sign in to DeepSeek in its separate Firefox window,
 then close that window. The helper checks your account and saves the connection automatically.</p>
-<a class="cta" id="deepseek-connect" data-account="${escapeHtml(account)}">Open Firefox</a>
+<a class="cta" id="deepseek-connect" data-account="${escapeHtml(providerLoginEmail("deepseek-app"))}">Open Firefox</a>
 <p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
 <div class="note">Requires the DeepSeek App login helper installed on this PC.
 Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
@@ -1036,10 +1041,19 @@ export async function handleCliLoginApi(
       res.end(JSON.stringify({ ok: false, error: "A private App bridge session JSON is required; see the provider documentation" }));
       return;
     }
+    const providerEmail = entry.email;
+    if (provider === "qwen-app" || provider === "deepseek-app") {
+      try { entry.email = registeredAccountEmail(entry, rotator.getConfig?.().accounts ?? [], provider); }
+      catch {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Ambiguous provider identity; resolve duplicate connections first" }));
+        return;
+      }
+    }
     const { isNew } = await addAccountToConfig(entry);
     await rotator.addOrUpdateAccount(entry);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, email: entry.email, isNew, verified: provider === "qwen-app" || provider === "deepseek-app" }));
+    res.end(JSON.stringify({ ok: true, email: entry.email, providerEmail, isNew, verified: provider === "qwen-app" || provider === "deepseek-app" }));
     return;
   }
 

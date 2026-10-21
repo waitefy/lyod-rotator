@@ -175,6 +175,8 @@ export const api = {
 
   setCustomQuota: (accountId: string, providerId: string, rule: CustomQuotaRule | null) =>
     request<{ ok: true }>("PUT", `/api/custom-quota/${enc(accountId)}`, { providerId, rule }),
+  linkWebAccount: (sourceId: string, targetId: string, providerId: string) =>
+    request<{ ok: true }>("POST", "/api/link-web-account", { sourceId, targetId, providerId }),
   config: () => request<Config>("GET", "/api/config"),
   saveConfig: (config: unknown) => request<{ ok: true }>("PUT", "/api/config", config),
   importConfig: (config: unknown) =>

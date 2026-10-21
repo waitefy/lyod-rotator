@@ -2541,6 +2541,26 @@ export function startProxy(
       return;
     }
 
+    if (method === "POST" && pathname === "/api/link-web-account") {
+      if (!requireAdmin(req, res)) return;
+      void readJsonRequest(req).then(async (body) => {
+        const { sourceId, targetId, providerId } = (body ?? {}) as Record<string, unknown>;
+        if (typeof sourceId !== "string" || typeof targetId !== "string" || sourceId === targetId ||
+            (providerId !== "deepseek-app" && providerId !== "qwen-app")) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Choose different source and target accounts and a supported provider" }));
+          return;
+        }
+        await rotator.linkWebAppAccount(sourceId, targetId, providerId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      }).catch((error) => {
+        res.writeHead(error instanceof PayloadTooLargeError ? 413 : 409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Unable to link: check the bridge, finish active requests, and ensure the target has no different provider account" }));
+      });
+      return;
+    }
+
     if (method === "PUT" && pathname.startsWith("/api/custom-quota/")) {
       if (!requireAdmin(req, res)) return;
       void readJsonRequest(req).then(async (body) => {

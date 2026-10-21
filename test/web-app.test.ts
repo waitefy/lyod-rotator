@@ -137,6 +137,16 @@ it("forwards exact messages and tools, isolates authorization and preserves cool
   assert.equal(rejected.response.headers.get("retry-after"), "50");
   assert.ok(!(await rejected.response.text()).includes("SECRET"));
 });
+it("serves a linked account by verified provider ID and refuses a different ID", async () => {
+  const linked = { ...account, config: { ...account.config, email: "linked@example.test" } } as AccountRuntime;
+  const result = await qwenAppAdapter.forwardRequest(linked, body("OK"), {});
+  assert.equal(result.response.status, 200);
+  await result.response.body?.cancel();
+  assert.equal((await qwenAppAdapter.validateCredentials(linked.config)).ok, true);
+  linked.config.credentials = [{ ...linked.config.credentials![0], providerAccountId: "wrong-id" }];
+  assert.equal((await qwenAppAdapter.forwardRequest(linked, body("OK"), {})).response.status, 401);
+  assert.equal((await qwenAppAdapter.validateCredentials(linked.config)).ok, false);
+});
 it("delivers first SSE delta before the bridge finishes and supports cancellation", async () => {
   const controller = new AbortController();
   const result = await qwenAppAdapter.forwardRequest(account, body("stream", { stream: true }), {}, controller.signal);
