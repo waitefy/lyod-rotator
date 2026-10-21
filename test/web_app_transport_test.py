@@ -127,6 +127,10 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             transport.identity_payload("qwen-app", {"token": "SECRET"})
         self.assertEqual(transport.identity_payload("qwen-app", {"id": "stable", "email": "A@example.test"}), ("stable", "a@example.test"))
+        first = transport.identity_payload("deepseek-app", {"code": 0, "data": {"biz_data": {"id": "one", "email": "a***@example.test"}}})
+        second = transport.identity_payload("deepseek-app", {"code": 0, "data": {"biz_data": {"id": "two", "email": "a***@example.test"}}})
+        self.assertNotEqual(first[1], second[1])
+        self.assertTrue(first[1].endswith("@deepseek-app.local"))
         with self.assertRaises(ValueError):
             transport.identity_payload("deepseek-app", {"code": 0, "data": {"biz_code": 401, "biz_data": {"id": "x"}}})
 

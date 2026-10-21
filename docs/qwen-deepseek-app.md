@@ -19,7 +19,7 @@ rotator-deepseek-login
 The same helpers are linked from `/login-cli`. Sign in and close the separate
 Firefox window. No cookie/token copy is required. A fresh sign-in uses an isolated
 profile so Google cannot silently reuse the last account; existing connections
-are preserved. A phone-only account without a returned email gets a stable
+are preserved. An account without a full unmasked email gets a stable
 `@deepseek-app.local` identity derived from its server account ID.
 
 Private settings are under `~/.config/lyod-rotator/{qwen-app,deepseek-app}`.

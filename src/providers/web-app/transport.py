@@ -68,8 +68,8 @@ def identity_payload(provider, payload):
         raise ValueError("Upstream did not return a stable account identity")
     account_id = str(account_id)
     email = info.get("email")
-    if not isinstance(email, str) or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
-        # Phone-only accounts: stable pseudonym, not a fabricated real email or token hash.
+    if not isinstance(email, str) or "*" in email or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        # Phone-only/redacted identities can collide: use the stable server ID.
         import hashlib
         email = hashlib.sha256(account_id.encode()).hexdigest()[:16] + "@" + provider + ".local"
     return account_id, email.lower()
