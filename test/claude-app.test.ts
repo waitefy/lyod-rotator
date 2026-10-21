@@ -316,7 +316,8 @@ it("offers local browser sign-in and keeps remote bridge registration explicit",
   assert.match(html, /panel-claude-app/);
   assert.match(html, /lyod-claude:\/\/login/);
   assert.match(html, /existing accounts are refreshed; new accounts get separate local bridges/);
-  assert.match(html, /Remote deployment is separate/);
+  assert.match(html, /the account is connected automatically/);
+  assert.match(html, /Sonnet 5.5 and its effort levels/);
   assert.match(html, /Advanced: register an existing bridge/);
   assert.match(html, /fetch\('\/api\/cli-login'/);
 });

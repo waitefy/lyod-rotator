@@ -172,6 +172,33 @@ def allocate(root, email):
     raise LoginError("Нет свободного локального порта для Claude App.")
 
 
+def register_remote(settings, connection):
+    if not settings.get("remote"):
+        return False
+    try:
+        script = Path(__file__).parents[1] / "chatgpt-app/remote_registration.py"
+        result = subprocess.run([sys.executable, str(script)],
+                                input=json.dumps({"provider": "claude-app", "remote": settings["remote"], "connection": connection}),
+                                text=True, capture_output=True, check=True, timeout=240)
+        response = json.loads(result.stdout)
+        if response.get("registered") is not True or response.get("email") != connection["email"]:
+            raise ValueError()
+        return True
+    except Exception:
+        raise LoginError("Локальный мост Claude сохранён, но сервер не подтвердил подключение. Повторите "
+                         "rotator-claude-login --register-only --account " + connection["email"] +
+                         ". Повторный вход в Firefox не нужен.") from None
+
+
+def save_registration(settings, connection, descriptor):
+    status = {"email": connection["email"], "sessionFile": str(descriptor), "registered": False}
+    root = Path(settings["configDir"])
+    ui.save_private(root / "login-status.json", status)
+    status["registered"] = register_remote(settings, connection)
+    ui.save_private(root / "login-status.json", status)
+    return status["registered"]
+
+
 def connect(settings, expected=None, progress=lambda text: None):
     root = Path(settings["configDir"])
     if not BINARY.is_file():
@@ -225,8 +252,9 @@ def connect(settings, expected=None, progress=lambda text: None):
             profile.rename(saved)
             profile = saved
         ui.save_private(directory / "browser-profile.json", {"path": str(profile)})
-        ui.save_private(root / "login-status.json", {"email": session["email"], "sessionFile": str(descriptor), "registered": False})
-        progress("Локальный мост готов. Сервер будет подключён после контрольного запроса.")
+        progress("Подключаем Claude к ротатору…")
+        registered = save_registration(settings, connection, descriptor)
+        progress("Аккаунт Claude подключён к ротатору." if registered else "Локальный мост готов; серверная регистрация не настроена.")
         return session["email"]
 
 
@@ -234,11 +262,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--account")
     parser.add_argument("--open")
+    parser.add_argument("--register-only", action="store_true")
     parser.add_argument("--no-page", action="store_true")
     args = parser.parse_args()
     try:
         settings = ui.read_private(ROOT / "browser-login.json")
         expected = ui.parse_link(args.open, settings["origin"]) if args.open else ui.email_value(args.account) if args.account else None
+        if args.register_only:
+            if not expected:
+                raise LoginError("Укажите --account для регистрации сохранённого подключения.")
+            descriptor = Path(settings["configDir"]) / "accounts" / hashlib.sha256(expected.encode()).hexdigest()[:24] / "session.json"
+            connection = ui.read_private(descriptor)
+            if connection["email"].casefold() != expected.casefold():
+                raise LoginError("Сохранённый аккаунт не совпадает с запрошенным.")
+            ui.check_bridge(connection)
+            if not save_registration(settings, connection, descriptor):
+                raise LoginError("Серверная регистрация не настроена.")
+            print("Аккаунт Claude подключён к ротатору: " + connection["email"])
+            return 0
         return ui.run_login(settings, expected, open_page=not args.no_page)
     except Exception as error:
         print(str(error) if isinstance(error, LoginError) else "Не удалось завершить вход Claude App; сохранённые аккаунты не изменены.", file=sys.stderr)

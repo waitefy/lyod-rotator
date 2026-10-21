@@ -73,3 +73,26 @@ class RegistrationTest(unittest.TestCase):
 
     def test_embedded_server_script_compiles(self):
         compile(registration.REMOTE, '<server-registration>', 'exec')
+
+    def test_claude_keeps_capabilities_and_uses_separate_tunnel_and_descriptor(self):
+        connection = dict(self.connection, modelSelection='explicit',
+                          availableModels=[{'id': 'claude-sonnet-5-5', 'efforts': ['high']}], adminApiKey='private-admin')
+        payloads = []
+        def run(command, **kwargs):
+            if command[0] == 'ssh':
+                payloads.append(json.loads(kwargs['input']))
+                return Mock(stdout=json.dumps({'ok': True, 'email': connection['email']}))
+            return Mock(returncode=0)
+        with patch.object(registration.subprocess, 'run', side_effect=run):
+            self.assertTrue(registration.register(self.remote, connection, self.root, provider='claude-app')['registered'])
+        self.assertEqual(payloads[-1]['provider'], 'claude-app')
+        self.assertTrue(payloads[-1]['filename'].startswith('claude-app-'))
+        self.assertEqual(payloads[-1]['session']['availableModels'], connection['availableModels'])
+        self.assertEqual(payloads[-1]['session']['modelSelection'], 'explicit')
+        service = next(self.root.glob('rotator-claude-bridge-*.service')).read_text()
+        self.assertNotIn('private-admin', service)
+        self.assertNotIn('bridge-secret', service)
+        with patch.object(registration.subprocess, 'run') as command:
+            with self.assertRaises(ValueError):
+                registration.register(self.remote, connection, self.root, provider='untrusted')
+            command.assert_not_called()

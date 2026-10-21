@@ -54,7 +54,7 @@ rotator-claude-login
 Where a proxy is needed, pass `--proxy http://127.0.0.1:2080` to the installer.
 Existing trusted settings and account files are preserved. The installer sets
 up the `lyod-claude://login` handler used by `/login-cli` → **Claude App**.
-The website panel becomes available after deployment of this code.
+The website panel is available at `/login-cli` → **Claude App** after deployment.
 
 Sign in to any Claude account in the separate Firefox window, wait for the chat
 to open, then close that specific window. The helper checks identity, allocates
@@ -86,14 +86,27 @@ default. The systemd unit contains paths only, not cookies or API keys.
 
 ## Registering and testing
 
-The helper currently provisions the **local bridge only**. It does not silently
-register or deploy an untested account on production. Successful `/v1/models`
-readiness means the listener is running; a real short generation must still
-succeed before declaring connectivity verified.
+The helper provisions an isolated local bridge. If its trusted private settings
+include a `remote` route (the same structure used by ChatGPT App), it also starts
+an account-specific SSH reverse tunnel and registers the connection automatically.
+The tunnel binds only server loopback. The Claude website session remains on the
+PC; only the bridge credentials and confirmed model/effort capabilities are copied
+to the server's private session directory. The PC must remain online.
+Successful `/v1/models` readiness means the listener is running; a real short
+generation must still succeed before declaring connectivity verified.
 
-Register the private descriptor through `/login-cli` → Claude App → Advanced,
-or `lyod-rotator login --provider claude-app`. The file must be readable by the
-rotator process. Its format is:
+A failed server registration preserves the signed-in profile and local bridge.
+Retry without opening Firefox:
+
+```sh
+rotator-claude-login --register-only --account user@example.com
+```
+
+The helper reports success only after the server confirms the same account.
+
+For manually managed bridges, register the private descriptor through
+`/login-cli` → Claude App → Advanced, or `lyod-rotator login --provider claude-app`.
+The file must be readable by the rotator process. Its format is:
 
 ```json
 {
@@ -109,8 +122,7 @@ rotator process. Its format is:
 ```
 
 A server cannot reach a desktop's loopback listener directly. Production needs
-an authenticated tunnel and a server-side descriptor with the tunnel endpoint;
-that deployment is separate from this first local milestone. Do not expose the
+the configured SSH tunnel and a server-side descriptor with the tunnel endpoint. Do not expose the
 bridge listener or reuse the website session as a public API credential.
 
 ## Capabilities and boundaries

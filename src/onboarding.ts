@@ -530,8 +530,8 @@ then close that window. The helper checks your account and saves the connection 
 <p>A local progress page shows whether sign-in succeeded. The saved Firefox profile is reused next time.</p>
 <div class="note">Requires the Claude App login helper installed on this PC.
 Sign in to any account: existing accounts are refreshed; new accounts get separate local bridges.
-The progress page provides the connection file for registration below. Remote deployment is separate.
-Free accounts use Auto: the website selects the model. Named models require separate verification.</div>
+With server registration configured in the helper, the account is connected automatically.
+Sonnet 5.5 and its effort levels are checked against your account's available models.</div>
 <script>
 (() => {
   const button = document.getElementById('claude-connect');

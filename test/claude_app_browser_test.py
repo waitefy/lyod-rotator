@@ -140,6 +140,21 @@ class ClaudeLoginTest(unittest.TestCase):
         self.assertIn("StandardError=null", text)
         self.assertNotIn("sessionKey", text)
 
+    def test_remote_registration_is_provider_specific_and_preserves_local_on_failure(self):
+        settings = dict(self.settings, remote={"sshHost": "root@rotator.example"})
+        connection = dict(self.session, apiKey="private-key")
+        descriptor = self.root / "session.json"
+        login.ui.save_private(descriptor, connection)
+        with patch.object(login.subprocess, "run", return_value=Mock(stdout=json.dumps({"registered": True, "email": connection["email"]}))) as run:
+            self.assertTrue(login.save_registration(settings, connection, descriptor))
+            self.assertEqual(json.loads(run.call_args.kwargs["input"])["provider"], "claude-app")
+            self.assertTrue(login.ui.read_private(self.root / "login-status.json")["registered"])
+        with patch.object(login.subprocess, "run", side_effect=RuntimeError("secret")):
+            with self.assertRaisesRegex(login.LoginError, "register-only"):
+                login.save_registration(settings, connection, descriptor)
+        self.assertEqual(login.ui.read_private(descriptor), connection)
+        self.assertFalse(login.ui.read_private(self.root / "login-status.json")["registered"])
+
 
 if __name__ == "__main__":
     unittest.main()
