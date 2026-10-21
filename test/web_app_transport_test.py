@@ -1,11 +1,13 @@
 """Offline boundary checks; no provider credentials or paid/live requests."""
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 import importlib.util
 import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 import tempfile
 import os
@@ -28,6 +30,76 @@ class Request(BaseModel):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_deepseek_manual_email_still_requires_server_account_id(self):
+        async def identity(*_args, **_kwargs):
+            return SimpleNamespace(status_code=200, json=lambda: {
+                "code": 0, "data": {"biz_data": {"id": "account-1", "email": "a***@example.test"}}})
+        config = dict(provider="deepseek-app", accountId="account-1", email="a@example.test", apiKey="test-key")
+        with patch.object(self, "identity", identity):
+            with TestClient(transport.create_app(config, self.upstream("deepseek-app"))):
+                pass
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                with TestClient(transport.create_app({**config, "accountId": "other"}, self.upstream("deepseek-app"))):
+                    pass
+
+    def test_deepseek_refresh_accepts_label_only_for_same_verified_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = dict(provider="deepseek-app", configDir=tmp)
+            email = "a@example.test"
+            directory = root / "accounts" / hashlib.sha256(email.encode()).hexdigest()[:24]
+            browser_login.ui.save_private(directory / "session.json", dict(provider="deepseek-app", email=email,
+                accountId="account-1", baseUrl="http://127.0.0.1:3340/v1", apiKey="test-key"))
+            async def identity(*_args):
+                return "account-1", "opaque@deepseek-app.local"
+            fake = SimpleNamespace(DeepSeekClient=lambda **_kwargs: SimpleNamespace(aclose=self.close_client))
+            with patch.dict(sys.modules, {"freetokenapi.deepseek.client": fake}), \
+                 patch.object(browser_login, "firefox_login"), patch.object(browser_login, "extract_token", return_value="test-token"), \
+                 patch.object(browser_login, "verify_identity", identity), patch.object(browser_login, "start_bridge"), \
+                 patch.object(browser_login, "check_bridge", return_value=[]), patch.object(browser_login, "register"):
+                self.assertEqual(browser_login.connect(settings, expected=email), email)
+                async def wrong_identity(*_args):
+                    return "other", "opaque@deepseek-app.local"
+                with patch.object(browser_login, "verify_identity", wrong_identity), self.assertRaises(browser_login.LoginError):
+                    browser_login.connect(settings, expected=email)
+
+    async def close_client(self):
+        pass
+
+    def test_missing_email_requires_input_instead_of_creating_phantom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(browser_login.LoginError, "укажите email"):
+                browser_login.account_email(root, "deepseek-app", "one", "opaque@deepseek-app.local")
+            self.assertEqual(browser_login.account_email(root, "deepseek-app", "one", "opaque@deepseek-app.local",
+                request_email=lambda: " User@Example.com "), "user@example.com")
+            with self.assertRaises(browser_login.LoginError):
+                browser_login.account_email(root, "deepseek-app", "one", "opaque@deepseek-app.local",
+                    request_email=lambda: "opaque@deepseek-app.local")
+            self.assertEqual(browser_login.account_email(root, "qwen-app", "one", "user@example.com",
+                request_email=lambda: self.fail("Known email must not prompt")), "user@example.com")
+            self.assertFalse((root / "accounts").exists())
+            legacy = root / "accounts/legacy/session.json"
+            browser_login.ui.save_private(legacy, dict(provider="deepseek-app", accountId="one",
+                                                       email="opaque@deepseek-app.local"))
+            self.assertEqual(browser_login.account_email(root, "deepseek-app", "one", "opaque@deepseek-app.local",
+                expected="opaque@deepseek-app.local"), "opaque@deepseek-app.local")
+            self.assertEqual(browser_login.account_email(root, "deepseek-app", "one", "opaque@deepseek-app.local",
+                request_email=lambda: "real@example.com"), "real@example.com")
+
+    def test_deepseek_page_has_no_chatgpt_branding(self):
+        ui = browser_login.ui
+        page, connect, scheme = ui.PAGE, ui.connect, ui.SCHEME
+        try:
+            with patch.object(sys, "argv", ["login", "--provider", "deepseek-app"]), \
+                 patch.object(ui, "read_private", return_value={}), patch.object(ui, "run_login", return_value=0) as run:
+                self.assertEqual(browser_login.main(), 0)
+                self.assertIn("LYOD ROTATOR · DEEPSEEK APP", ui.PAGE)
+                self.assertNotIn("chatgpt", ui.PAGE.lower())
+                self.assertTrue(run.call_args.kwargs["collect_email"])
+        finally:
+            ui.PAGE, ui.connect, ui.SCHEME = page, connect, scheme
+
     def upstream(self, provider):
         client = SimpleNamespace(http=SimpleNamespace(get=self.identity), fetch_models=self.fetch_models)
         account = SimpleNamespace(client=client)

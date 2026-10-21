@@ -390,21 +390,60 @@ h1{line-height:1.15}#status{padding:18px;background:#eef4ee;border-radius:14px}s
 </style><main><small>LYOD ROTATOR · CHATGPT APP</small><h1>Вход через Firefox</h1>
 <p>В отдельном окне войдите в ChatGPT, затем закройте именно это окно. При общем входе прежний вход ChatGPT в этом окне сбрасывается, чтобы можно было выбрать аккаунт. Подключённые мосты и Bitwarden сохраняются. Сохранённый профиль используется повторно.</p>
 <p id="status" role="status" aria-live="polite">Открываем Firefox…</p><small>Пароли и сессия не отображаются на этой странице. Мост остаётся на ПК. Если настроен сервер, аккаунт подключится к нему автоматически.</small>
-<script>async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;if(!d.done)setTimeout(poll,1000)}catch{document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()</script></main></html>"""
+<form id="identity" hidden><label>Почта аккаунта, в который вы вошли<br><input id="email" type="email" maxlength="254" autocomplete="email" required></label> <button>Подключить аккаунт</button><p>Сайт не сообщил открытую почту. Она используется для подписи и привязки карточки; вход проверяется по ID аккаунта на сайте.</p></form>
+<script>
+const form=document.getElementById('identity');
+form.addEventListener('submit',async e=>{e.preventDefault();try{const r=await fetch('./email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('email').value})});if(r.ok)form.hidden=true;else document.getElementById('status').textContent='Укажите корректную почту аккаунта.'}catch{document.getElementById('status').textContent='Не удалось отправить почту. Повторите попытку.'}});
+async function poll(){try{const r=await fetch('./status',{cache:'no-store'});const d=await r.json();document.getElementById('status').textContent=d.message;form.hidden=!d.needsEmail||d.done;if(!d.done)setTimeout(poll,1000)}catch{form.hidden=true;document.getElementById('status').textContent='Помощник закрыт. Повторите вход кнопкой подключения.'}}poll()
+</script></main></html>"""
 
 
-def run_login(settings, expected=None, open_page=True):
+def run_login(settings, expected=None, open_page=True, collect_email=False):
     nonce = secrets.token_urlsafe(32)
     state = {"done": False, "message": "Открываем Firefox…"}
     finished = threading.Event()
+    email_ready = threading.Event()
+    email_input = {}
 
     def progress(text):
         state.update(message=text)
         save_private(Path(settings["configDir"]) / "login-progress.json", state)
 
+    def request_email():
+        if not open_page:
+            raise LoginError("Сайт не сообщил почту. Повторите вход без --no-page и укажите email на странице помощника.")
+        state.update(needsEmail=True, message="Сайт подтвердил вход, но не сообщил почту. Укажите её ниже (в течение 10 минут).")
+        if not email_ready.wait(600):
+            state.update(needsEmail=False)
+            raise LoginError("Почта не указана. Подключение не создано; профиль Firefox сохранён.")
+        state.update(needsEmail=False)
+        return email_input["email"]
+
     class StatusHandler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
+
+        def do_POST(self):
+            host = "127.0.0.1:" + str(self.server.server_port)
+            if (self.headers.get("Host") != host or self.path != "/" + nonce + "/email"
+                    or self.headers.get("Origin") != "http://" + host):
+                self.send_error(403)
+                return
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if (not 0 < size <= 1024 or self.headers.get("Content-Type") != "application/json"
+                        or not state.get("needsEmail") or email_ready.is_set()):
+                    raise ValueError()
+                email = email_value(json.loads(self.rfile.read(size))["email"].strip())
+                if email.endswith(".local"):
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError, AttributeError):
+                self.send_error(400)
+                return
+            email_input["email"] = email
+            email_ready.set()
+            self.send_response(204)
+            self.end_headers()
 
         def do_GET(self):
             if self.headers.get("Host") != "127.0.0.1:" + str(self.server.server_port):
@@ -427,7 +466,8 @@ def run_login(settings, expected=None, open_page=True):
 
     def worker():
         try:
-            account = connect(settings, expected, progress)
+            account = (connect(settings, expected, progress, request_email=request_email) if collect_email else
+                       connect(settings, expected, progress))
             status = read_private(Path(settings["configDir"]) / "login-status.json")
             if status.get("registered"):
                 message = "Аккаунт подключён к ротатору: " + account + ". Можно закрыть страницу."

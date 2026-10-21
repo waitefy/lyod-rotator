@@ -202,7 +202,27 @@ def register(settings, connection, descriptor):
     ui.save_private(root / "login-status.json", status)
 
 
-def connect(settings, expected=None, progress=lambda _text: None):
+def account_email(root, provider, account_id, email, expected=None, request_email=None):
+    if not email.endswith("@" + provider + ".local"):
+        return email
+    # Reuse an explicit label only after verifying the same stable upstream ID.
+    for descriptor in (root / "accounts").glob("*/session.json"):
+        saved = ui.read_private(descriptor)
+        if (saved.get("provider") == provider and saved.get("accountId") == account_id
+                and (not saved["email"].endswith("@" + provider + ".local") or saved["email"] == expected)
+                and (not expected or saved["email"] == expected)):
+            return saved["email"]
+    if expected:
+        raise LoginError("Не удалось подтвердить привязку к выбранной почте. Добавьте аккаунт через общий вход.")
+    if request_email is None:
+        raise LoginError("Сайт не сообщил почту. Повторите вход со страницей помощника и укажите email.")
+    entered = ui.email_value(request_email().strip())
+    if entered.endswith(".local"):
+        raise LoginError("Укажите настоящую почту аккаунта, а не технический адрес .local.")
+    return entered
+
+
+def connect(settings, expected=None, progress=lambda _text: None, request_email=None):
     import asyncio
     provider = settings["provider"]
     root = Path(settings["configDir"])
@@ -253,6 +273,7 @@ def connect(settings, expected=None, progress=lambda _text: None):
             account_id, email = asyncio.run(identity())
         except Exception:
             raise LoginError("Сайт не подтвердил личность аккаунта. Профиль сохранён; другие подключения не изменены.") from None
+        email = account_email(root, provider, account_id, email, expected, request_email)
         if expected and expected != email:
             raise LoginError("Вход выполнен в другой аккаунт; прежнее подключение не изменено.")
         directory, connection = allocate(root, provider, email, account_id)
@@ -290,7 +311,8 @@ def main():
     args = parser.parse_args()
     root = Path.home() / ".config/lyod-rotator" / args.provider
     ui.SCHEME = "lyod-" + args.provider.removesuffix("-app")
-    ui.PAGE = ui.PAGE.replace("ChatGPT", "Qwen" if args.provider == "qwen-app" else "DeepSeek")
+    label = "Qwen" if args.provider == "qwen-app" else "DeepSeek"
+    ui.PAGE = ui.PAGE.replace("ChatGPT", label).replace("CHATGPT", label.upper())
     ui.connect = connect
     try:
         settings = ui.read_private(root / "browser-login.json")
@@ -307,7 +329,7 @@ def main():
             register(settings, connection, descriptor)
             print("Подключение зарегистрировано: " + expected)
             return 0
-        return ui.run_login(settings, expected, open_page=not args.no_page)
+        return ui.run_login(settings, expected, open_page=not args.no_page, collect_email=True)
     except Exception as exc:
         print(str(exc) if isinstance(exc, LoginError) else "Вход не завершён. Профиль сохранён; другие аккаунты не изменены.", file=sys.stderr)
         return 1

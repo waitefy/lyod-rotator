@@ -19,8 +19,13 @@ rotator-deepseek-login
 The same helpers are linked from `/login-cli`. Sign in and close the separate
 Firefox window. No cookie/token copy is required. A fresh sign-in uses an isolated
 profile so Google cannot silently reuse the last account; existing connections
-are preserved. An account without a full unmasked email gets a stable
-`@deepseek-app.local` identity derived from its server account ID.
+are preserved. If the site does not return a full unmasked email, the local
+status page asks for it after the Firefox window closes. Enter the email of the
+account you just signed into; it is used as the account-card label, while the
+bridge verifies the stable upstream account ID. A known label is reused only
+for the same upstream ID. No new technical `.local` card is created when the
+email is missing; without an entered email, registration stops. This step
+requires the status page (run without `--no-page`).
 
 All five App login helpers (ChatGPT, Claude, Gemini, Qwen and DeepSeek) reuse a
 locally installed Bitwarden XPI from
@@ -37,7 +42,7 @@ Login remains available if no local extension package is installed.
 
 Private settings are under `~/.config/lyod-rotator/{qwen-app,deepseek-app}`.
 
-If DeepSeek returns no full email, its technical identity can be linked to an
+For connections saved by older helper versions, a technical identity can be linked to an
 existing account card: open the technical card in the dashboard, choose
 **Link to an existing account**, select your account, and click **Link DeepSeek App**.
 The bridge's authenticated account ID is verified before moving the connection.

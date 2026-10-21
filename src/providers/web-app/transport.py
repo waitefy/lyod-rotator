@@ -85,6 +85,12 @@ async def verify_identity(client, provider):
     return account_id, email
 
 
+def identity_matches(config, account_id, email):
+    # An entered email is a local label, never a substitute for the server ID.
+    return (account_id == config["accountId"] and
+            (email == config["email"] or email.endswith("@" + config["provider"] + ".local")))
+
+
 def configure(config, config_path=None):
     if config.get("provider") not in ("qwen-app", "deepseek-app") or not config.get("token") or not config.get("apiKey"):
         raise ValueError("Invalid private bridge configuration")
@@ -143,7 +149,7 @@ def create_app(config, upstream):
             if pool is None or len(pool.accounts) != 1:
                 raise ValueError("Exactly one upstream account is required")
             actual_id, actual_email = await verify_identity(pool.accounts[0].client, provider)
-            if actual_id != config["accountId"] or actual_email != config["email"]:
+            if not identity_matches(config, actual_id, actual_email):
                 raise ValueError("Bridge account identity mismatch")
             yield
 

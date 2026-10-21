@@ -9,6 +9,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+import urllib.request
+import urllib.error
+from urllib.parse import urlsplit
 import unittest
 from unittest.mock import Mock, patch
 
@@ -18,6 +22,53 @@ spec.loader.exec_module(login)
 
 
 class BrowserLoginTest(unittest.TestCase):
+    def test_manual_email_form_checks_origin_and_accepts_valid_input(self):
+        errors = []
+        threads = []
+        def connect(settings, expected, progress, request_email):
+            email = request_email()
+            self.assertEqual(email, "user@example.com")
+            login.save_private(self.root / "login-status.json", {"registered": True})
+            return email
+        def open_page(args, **_kwargs):
+            url = args[1]
+            def browser():
+                try:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with opener.open(url, timeout=5) as response:
+                        self.assertIn('type="email"', response.read().decode())
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with opener.open(url + "status", timeout=5) as response:
+                            if json.load(response).get("needsEmail"):
+                                break
+                        threading.Event().wait(0.01)
+                    else:
+                        self.fail("Email prompt did not appear")
+                    for origin, email, status in [("https://evil.example", "user@example.com", 403),
+                                                   ("http://" + urlsplit(url).netloc, "invalid", 400),
+                                                   ("http://" + urlsplit(url).netloc, "user@example.com", 204)]:
+                        request = urllib.request.Request(url + "email", data=json.dumps({"email": email}).encode(),
+                            headers={"Content-Type": "application/json", "Origin": origin})
+                        try:
+                            with opener.open(request, timeout=5) as response:
+                                actual = response.status
+                        except urllib.error.HTTPError as error:
+                            actual = error.code
+                            error.close()
+                        self.assertEqual(actual, status)
+                except Exception as error:
+                    errors.append(error)
+            thread = threading.Thread(target=browser, daemon=True)
+            threads.append(thread)
+            thread.start()
+        with patch.object(login, "connect", connect), patch.object(login.subprocess, "run", open_page), \
+             patch.object(login.time, "sleep"):
+            self.assertEqual(login.run_login(self.settings, collect_email=True), 0)
+        for thread in threads:
+            thread.join(5)
+        self.assertFalse(errors, errors)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
