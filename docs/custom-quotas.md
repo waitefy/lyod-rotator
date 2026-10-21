@@ -2,7 +2,21 @@
 
 Open an account in **Dashboard → Accounts → Local request budgets**. For each
 provider, set a positive number of requests and a window in hours (1–8760).
-Budgets are disabled until configured; no service limits are guessed.
+New ChatGPT App, Claude App, Qwen App and DeepSeek App connections receive an
+initial operator budget. These are local safeguards, not quotas reported or
+guaranteed by the services:
+
+| Provider | Successful requests | Window |
+| --- | ---: | --- |
+| ChatGPT App | 100 | 5 hours |
+| Claude App | 12 | 5 hours |
+| Qwen App | 80 | 24 hours |
+| DeepSeek App | 60 | 1 hour |
+
+These defaults apply only when connecting a provider for the first time. Signing
+in again preserves edited or disabled budgets and does not refill their usage.
+Other providers have no custom budget unless configured explicitly. Native
+provider quotas continue to apply independently.
 
 - One successful rotator API request consumes one unit. An agent conversation
   can make many API requests, including a new request after each tool result.

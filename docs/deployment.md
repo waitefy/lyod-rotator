@@ -17,6 +17,32 @@ For Gemini App dependencies and sessions, follow [the provider guide](gemini-web
 
 Dashboard: `http://localhost:51200/dashboard`. Add providers at `/login-cli`.
 
+## Desktop-assisted App providers
+
+ChatGPT App, Claude App, Qwen App and DeepSeek App can use a separate private
+bridge on the desktop for each account. The login helpers register connections
+with the server automatically when their remote settings are configured. Use
+the provider button at `/login-cli`, complete sign-in in the separate Firefox
+window and close that window. Manual descriptor registration is the advanced
+path, not an additional step after a successful automatic registration.
+
+Keep the desktop online while using these bridges. Their processes and SSH
+tunnels are user services with automatic restart; shutting down the desktop
+makes the corresponding server routes unavailable. Gemini App can also depend
+on the desktop's configured egress tunnel. An active rotator container alone
+does not prove that an upstream web session is usable.
+
+For an operational check, verify both `/api/catalog` and `/v1/models`, provider
+routing availability in `/api/status`, and authenticated bridge `/v1/models`
+responses. These read-only checks do not generate model answers or establish
+remaining upstream quota. Do not include session descriptors, authentication
+headers or full request logs in diagnostic reports.
+
+Configure [local request budgets](custom-quotas.md) independently from
+[model context windows](model-context.md). Exhausting a budget excludes only
+that account/provider until reset; it does not authorize a silent switch to a
+different model or provider.
+
 ## Docker (build on your PC)
 
 From this fork's checkout:

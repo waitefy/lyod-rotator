@@ -91,8 +91,11 @@ Search is opt-in and validated against the account/model catalog.
 
 **Current boundary:** text, incremental SSE and tool trajectories. Attachments,
 vision, image/video generation and deep research are not enabled by this initial
-integration. Unknown context windows and usage quotas are not replaced with
-invented values. Usage counters from the bridge are estimates, not billing data.
+integration. Known models publish the working windows documented in
+[model context](model-context.md); unknown models keep an unknown window.
+New connections receive an editable [local request budget](custom-quotas.md),
+separate from the service's quota. Usage counters from the bridge are estimates,
+not billing data.
 
 ## Isolation and failure handling
 
