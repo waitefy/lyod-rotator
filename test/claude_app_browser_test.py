@@ -28,18 +28,34 @@ class ClaudeLoginTest(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 login.ui.parse_link(url, self.settings["origin"])
 
-    def test_free_and_paid_identity_come_from_bootstrap_capabilities(self):
+    def test_free_and_paid_identity_use_actual_model_catalog(self):
         from curl_cffi import requests
-        for capabilities, expected in [(["chat"], "default-only"), (["chat", "claude_pro"], "explicit")]:
+        for capabilities in (["chat"], ["chat", "claude_pro"]):
             response = Mock(status_code=200)
-            response.json.return_value = {"account": {"email_address": "one@example.com", "memberships": [{"organization": {"capabilities": capabilities}}]}}
+            response.json.return_value = {"account": {"email_address": "one@example.com", "memberships": [{"organization": {"uuid": "fixture", "capabilities": capabilities}}]}}
+            catalog = Mock(status_code=200)
+            catalog.json.return_value = {"model_selector_config": [{"id": "chat", "models": [
+                {"id": "claude-sonnet-5-5", "thinking": {"effort_options": [{"id": effort} for effort in ("low", "medium", "high", "xhigh", "max")]}},
+                {"id": "claude-opus-5-5", "disabled": True},
+                {"id": "claude-fable-5", "disabled_reason": {"type": "upgrade_required"}},
+            ]}]}
             client = Mock()
-            client.get.return_value = response
+            client.get.side_effect = [response, catalog]
             with patch.object(requests, "Session") as factory:
                 factory.return_value.__enter__.return_value = client
-                self.assertEqual(login.identity([(".claude.ai", "/", "sessionKey", "private-fixture")])["modelSelection"], expected)
-                self.assertEqual(client.get.call_args.args[0], "https://claude.ai/api/bootstrap")
+                identity = login.identity([(".claude.ai", "/", "sessionKey", "private-fixture")])
+                self.assertEqual(identity["modelSelection"], "explicit")
+                self.assertEqual(identity["availableModels"], [{"id": "claude-sonnet-5-5", "efforts": ["low", "medium", "high", "xhigh", "max"]}])
+                self.assertEqual(client.get.call_args.args[0], "https://claude.ai/api/organizations/fixture/model_selector/chat")
                 self.assertFalse(client.get.call_args.kwargs["allow_redirects"])
+
+    def test_catalog_excludes_disabled_efforts_and_other_surfaces(self):
+        catalog = {"model_selector_config": [
+            {"id": "other", "models": [{"id": "claude-opus-5-5"}]},
+            {"id": "chat", "models": [{"id": "claude-sonnet-5-5", "thinking": {"effort_options": [
+                {"id": "low"}, {"id": "high", "disabled": True},
+                {"id": "max", "disabled_reason": "upgrade_required"}, {"id": "unknown"}]}}]}]}
+        self.assertEqual(login.available_models(catalog), [{"id": "claude-sonnet-5-5", "efforts": ["low"]}])
 
     def test_config_disables_secret_logs_and_retries_and_pins_web_endpoint(self):
         connection = {**self.session, "baseUrl": "http://127.0.0.1:3140/v1", "apiKey": "key", "adminApiKey": "admin-key"}

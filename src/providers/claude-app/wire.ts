@@ -7,6 +7,7 @@ export function toBridgeRequest(request: Record<string, unknown>): Record<string
   return { model: request.model, messages: messages.filter((message) => message.role !== "system"),
     ...(system ? { system } : {}), stream: request.stream === true,
     max_tokens: request.max_tokens ?? request.max_completion_tokens ?? 4096,
+    ...(request.reasoning_effort !== undefined ? { output_config: { effort: request.reasoning_effort } } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.top_p !== undefined ? { top_p: request.top_p } : {}),
     ...(request.stop !== undefined ? { stop_sequences: typeof request.stop === "string" ? [request.stop] : request.stop } : {}),

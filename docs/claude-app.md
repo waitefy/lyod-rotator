@@ -11,23 +11,31 @@ The installer verifies the archive and preserves that stock executable. The loca
 service uses a separately built `clewdr-lyod` binary with the tracked patch in
 `scripts/claude-app/clewdr-retry-after.patch`; automatic upstream updates are disabled.
 
-## Free account and model identity
+## Model selection and effort
 
-The default public model is **`claude-app-auto`**. ClewdR omits the outbound
-model selector for free accounts; Claude's website selects the actual model.
-Auto must never be presented as a verified Sonnet or Opus version.
+The default named public model is **`claude-app-sonnet-5-5`**, mapped to the
+website slug **`claude-sonnet-5-5`**. Supported reasoning efforts are `low`,
+`medium`, `high`, `xhigh` and `max`; Sonnet defaults to `medium` when omitted.
+For Chat Completions, pass `"reasoning_effort": "high"` (or another supported value).
+The adapter sends native `output_config.effort` to the patched bridge, which
+writes `model`, `effort` and `thinking_mode: "auto"` in the website completion.
+These field names match the website's completion serializer.
 
-The login helper checks `/api/bootstrap` for the account email and organization
-capabilities, using the same paid-capability rule as this pinned bridge. Its
-private descriptor records `modelSelection: "default-only"` for free accounts.
-Such accounts cannot serve an explicit named alias: the adapter rejects that
-request before contacting the bridge.
+The login helper checks `/api/bootstrap` for identity, then reads the account's
+`/api/organizations/{organization}/model_selector/chat` catalog. It stores enabled
+model IDs and effort options in the private descriptor as `availableModels`.
+Entitlement is not inferred from free/paid plan labels: a free account can offer
+explicit Sonnet selection. Disabled models and efforts are excluded. The adapter
+rejects unavailable Sonnet models or efforts before contacting the bridge.
+Existing descriptors with `modelSelection: "default-only"` retain Auto-only
+access until refreshed using the login helper.
 
-`LYOD_CLAUDE_APP_MODELS` is an operator allowlist, default `auto`, not entitlement
-discovery. Do not add named slugs until the selected account and the outbound
-selection have been checked. Neither the bridge's static `/v1/models`, its
-returned `model` nor self-identification proves which model executed a request.
-The catalog deliberately reports unknown context and unverified availability.
+`LYOD_CLAUDE_APP_MODELS` is an operator allowlist, default `sonnet-5-5,auto`,
+not entitlement discovery. **`claude-app-auto`** remains optional and deliberately
+omits the outbound model selector. Explicit named requests never fall back to
+Auto. Neither the bridge's static `/v1/models`, its echoed response `model` nor
+self-identification proves backend execution. The catalog deliberately reports
+unknown context and unverified availability.
 
 ## Local installation and sign-in
 
@@ -93,7 +101,10 @@ rotator process. Its format is:
   "baseUrl": "http://127.0.0.1:3140/v1",
   "apiKey": "LOCAL_BRIDGE_KEY",
   "adminApiKey": "LOCAL_BRIDGE_ADMIN_KEY",
-  "modelSelection": "default-only"
+  "modelSelection": "explicit",
+  "availableModels": [
+    { "id": "claude-sonnet-5-5", "efforts": ["low", "medium", "high", "xhigh", "max"] }
+  ]
 }
 ```
 
@@ -116,8 +127,8 @@ bridge listener or reuse the website session as a public API credential.
   history; the client executes tools. This is not native Claude tool calling.
 - Partial tool markers are buffered; ordinary text is streamed immediately.
   A truncated converted stream fails instead of claiming successful completion.
-- Attachments/vision, structured output, thinking effort selection and audio are explicitly rejected in this
-  first integration. Image upload in the underlying project is insufficient
+- Attachments/vision, structured output, raw `thinking` settings and audio are
+  explicitly rejected. Use `reasoning_effort` for adaptive thinking instead. Image upload in the underlying project is insufficient
   evidence of working end-to-end support.
 - Header deadline is 600 seconds. Only pre-stream HTTP 429 with an explicit
   numeric Retry-After of at most 10 seconds is retried, at most twice with bounded
@@ -149,6 +160,18 @@ real account quotas. They do not prove successful website authentication or
 which backend model served a live request.
 
 ## Live validation
+
+A free account's current website catalog offered `claude-sonnet-5-5` with all
+five effort levels. Five short controls through an isolated patched bridge and
+the real Firefox relay completed with HTTP 200 and the exact requested text:
+`low` 7.055 s, `medium` 4.660 s, `high` 5.945 s, `xhigh` 4.724 s, `max` 5.472 s.
+A diagnostic wrapper captured only the outgoing completion's `model`, `effort`
+and `thinking_mode`: every request carried `claude-sonnet-5-5`, its selected
+effort and `auto`, respectively, with no subsequent alternative-model request.
+After installation, a separate control through the adapter and persistent local
+service completed with explicit Sonnet / High, `[DONE]` and exact text in 6.048 s.
+These observations verify explicit selection and accepted streaming requests;
+they do not independently identify the internal backend executing them.
 
 A free-account control completed a real tool roundtrip through the persistent
 local systemd service and the Claude App adapter: the model requested a declared

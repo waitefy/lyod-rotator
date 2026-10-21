@@ -12,16 +12,47 @@ index 6a05795..db29653 100644
                          continue;
                      }
                      return Err(e);
+diff --git a/src/claude_web_state/transform.rs b/src/claude_web_state/transform.rs
+index c24135f..8f98ad7 100644
+--- a/src/claude_web_state/transform.rs
++++ b/src/claude_web_state/transform.rs
+@@ -37,11 +37,16 @@ impl ClaudeWebState {
+             max_tokens_to_sample: value.max_tokens,
+             attachments: vec![Attachment::new(merged.paste)],
+             files: vec![],
+-            model: if self.is_pro() {
+-                Some(value.model)
+-            } else {
+-                None
+-            },
++            model: (value.model != "default").then_some(value.model),
++            effort: value
++                .output_config
++                .as_ref()
++                .and_then(|config| config.effort),
++            thinking_mode: value
++                .output_config
++                .as_ref()
++                .and_then(|config| config.effort)
++                .map(|_| "auto".to_string()),
+             rendering_mode: if value.stream.unwrap_or_default() {
+                 "messages".to_string()
+             } else {
 diff --git a/src/error.rs b/src/error.rs
-index ca6c85a..bb0405f 100644
+index ca6c85a..61f4d2b 100644
 --- a/src/error.rs
 +++ b/src/error.rs
-@@ -191,6 +191,14 @@ impl IntoResponse for ClewdrError {
+@@ -191,6 +191,19 @@ impl IntoResponse for ClewdrError {
              ClewdrError::JsonRejection { ref source } => {
                  (source.status(), json!(source.body_text()))
              }
-+            ClewdrError::InvalidCookie { reason: Reason::TooManyRequest(reset) } => {
-+                let retry = reset.saturating_sub(Utc::now().timestamp()).max(1).to_string();
++            ClewdrError::InvalidCookie {
++                reason: Reason::TooManyRequest(reset),
++            } => {
++                let retry = reset
++                    .saturating_sub(Utc::now().timestamp())
++                    .max(1)
++                    .to_string();
 +                return (
 +                    StatusCode::TOO_MANY_REQUESTS,
 +                    [("retry-after", retry)],
@@ -31,7 +62,7 @@ index ca6c85a..bb0405f 100644
              ClewdrError::TooManyRetries => (StatusCode::GATEWAY_TIMEOUT, json!(self.to_string())),
              ClewdrError::PathNotFound { .. } => (StatusCode::NOT_FOUND, json!(self.to_string())),
              ClewdrError::InvalidAuth => (StatusCode::UNAUTHORIZED, json!(self.to_string())),
-@@ -292,6 +300,7 @@ impl CheckClaudeErr for Response {
+@@ -292,6 +305,7 @@ impl CheckClaudeErr for Response {
          if status.is_success() {
              return Ok(self);
          }
@@ -39,7 +70,7 @@ index ca6c85a..bb0405f 100644
          let reset_header = self
              .headers()
              .get("anthropic-ratelimit-unified-reset")
-@@ -357,7 +366,8 @@ impl CheckClaudeErr for Response {
+@@ -357,7 +371,8 @@ impl CheckClaudeErr for Response {
              // get the reset time from the error message
              let ts = inner_error.message["resetsAt"]
                  .as_i64()
@@ -49,7 +80,7 @@ index ca6c85a..bb0405f 100644
              if let Some(ts) = ts {
                  let reset_time = chrono::DateTime::from_timestamp(ts, 0)
                      .ok_or(ClewdrError::TimestampError { timestamp: ts })?
-@@ -381,3 +391,32 @@ impl CheckClaudeErr for Response {
+@@ -381,3 +396,47 @@ impl CheckClaudeErr for Response {
          })
      }
  }
@@ -68,8 +99,14 @@ index ca6c85a..bb0405f 100644
 +
 +    #[test]
 +    fn honors_explicit_retry_after_without_inventing_an_hour() {
-+        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("0")), 100), Some(101));
-+        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("17")), 100), Some(117));
++        assert_eq!(
++            retry_after_reset(Some(&HeaderValue::from_static("0")), 100),
++            Some(101)
++        );
++        assert_eq!(
++            retry_after_reset(Some(&HeaderValue::from_static("17")), 100),
++            Some(117)
++        );
 +        let response = super::ClewdrError::InvalidCookie {
 +            reason: crate::config::Reason::TooManyRequest(chrono::Utc::now().timestamp() + 17),
 +        };
@@ -77,8 +114,70 @@ index ca6c85a..bb0405f 100644
 +        assert_eq!(response.status(), wreq::StatusCode::TOO_MANY_REQUESTS);
 +        assert!(response.headers().contains_key("retry-after"));
 +        assert_eq!(retry_after_reset(None, 100), None);
-+        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("invalid")), 100), None);
-+        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("-1")), 100), None);
-+        assert_eq!(retry_after_reset(Some(&HeaderValue::from_static("18446744073709551615")), 100), None);
++        assert_eq!(
++            retry_after_reset(Some(&HeaderValue::from_static("invalid")), 100),
++            None
++        );
++        assert_eq!(
++            retry_after_reset(Some(&HeaderValue::from_static("-1")), 100),
++            None
++        );
++        assert_eq!(
++            retry_after_reset(Some(&HeaderValue::from_static("18446744073709551615")), 100),
++            None
++        );
++    }
++}
+diff --git a/src/types/claude_web/request.rs b/src/types/claude_web/request.rs
+index 2b25532..e635e91 100644
+--- a/src/types/claude_web/request.rs
++++ b/src/types/claude_web/request.rs
+@@ -1,4 +1,4 @@
+-use anthropic_wire::ImageSource;
++use anthropic_wire::{ImageSource, OutputEffort};
+ use serde::{Deserialize, Serialize};
+ 
+ /// Claude.ai attachment
+@@ -37,6 +37,10 @@ pub struct WebRequestBody {
+     pub files: Vec<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub model: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub effort: Option<OutputEffort>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub thinking_mode: Option<String>,
+     pub rendering_mode: String,
+     pub prompt: String,
+     pub timezone: String,
+@@ -61,3 +65,31 @@ impl Tool {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod lyod_model_selection_tests {
++    use super::*;
++
++    #[test]
++    fn serializes_each_effort_with_explicit_model_and_adaptive_mode() {
++        for effort in ["low", "medium", "high", "xhigh", "max"] {
++            let request = WebRequestBody {
++                max_tokens_to_sample: 4096,
++                attachments: vec![],
++                files: vec![],
++                model: Some("claude-sonnet-5-5".into()),
++                effort: Some(serde_json::from_value(serde_json::json!(effort)).unwrap()),
++                thinking_mode: Some("auto".into()),
++                rendering_mode: "messages".into(),
++                prompt: "control".into(),
++                timezone: "UTC".into(),
++                images: vec![],
++                tools: vec![],
++            };
++            let wire = serde_json::to_value(request).unwrap();
++            assert_eq!(wire["model"], "claude-sonnet-5-5");
++            assert_eq!(wire["effort"], effort);
++            assert_eq!(wire["thinking_mode"], "auto");
++        }
 +    }
 +}

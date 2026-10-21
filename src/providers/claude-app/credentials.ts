@@ -8,7 +8,7 @@ const MODEL_PREFIX = "claude-app-";
 
 /** Explicit operator allowlist, not a claim of account entitlement. */
 export function claudeAppModels(): string[] {
-  return [...new Set((process.env.LYOD_CLAUDE_APP_MODELS ?? "auto").split(",")
+  return [...new Set((process.env.LYOD_CLAUDE_APP_MODELS ?? "sonnet-5-5,auto").split(",")
     .map((id) => id.trim()).filter((id) => /^[a-z0-9][a-z0-9._-]{0,127}$/.test(id)))]
     .map((id) => MODEL_PREFIX + id);
 }
@@ -19,7 +19,8 @@ export function isClaudeAppModel(model: string): boolean {
 
 export function upstreamModel(model: string): string {
   if (!claudeAppModels().includes(model)) throw new Error("Claude App model is not in LYOD_CLAUDE_APP_MODELS");
-  return model.slice(MODEL_PREFIX.length);
+  const name = model.slice(MODEL_PREFIX.length);
+  return name === "sonnet-5-5" ? "claude-sonnet-5-5" : name;
 }
 
 export interface BridgeSession {
@@ -28,6 +29,7 @@ export interface BridgeSession {
   apiKey: string;
   adminApiKey?: string;
   modelSelection: "explicit" | "default-only";
+  availableModels?: Array<{ id: string; efforts: string[] }>;
 }
 
 export function getSessionFile(config: AccountConfig): string | undefined {
@@ -50,6 +52,9 @@ export async function readBridgeSession(path: string | undefined): Promise<Bridg
       typeof data.apiKey !== "string" || !data.apiKey.trim() || data.apiKey.length > 4096 || /[\r\n]/.test(data.apiKey) ||
       typeof data.baseUrl !== "string" || data.baseUrl.length > 2048 ||
       !["explicit", "default-only"].includes(data.modelSelection)) throw new Error();
+    if (data.availableModels !== undefined && (!Array.isArray(data.availableModels) || data.availableModels.length > 64 ||
+      data.availableModels.some((model) => !model || typeof model.id !== "string" || !/^[a-z0-9-]{1,128}$/.test(model.id) ||
+        !Array.isArray(model.efforts) || model.efforts.some((effort) => !["low", "medium", "high", "xhigh", "max"].includes(effort))))) throw new Error();
     if (data.adminApiKey !== undefined && (typeof data.adminApiKey !== "string" ||
       !data.adminApiKey.trim() || data.adminApiKey.length > 4096 || /[\r\n]/.test(data.adminApiKey))) throw new Error();
     const url = new URL(data.baseUrl);
@@ -58,6 +63,7 @@ export async function readBridgeSession(path: string | undefined): Promise<Bridg
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))) ||
       url.username || url.password || url.search || url.hash || !["", "/", "/v1", "/v1/"].includes(url.pathname)) throw new Error();
     return { modelSelection: data.modelSelection, email: data.email.trim(), apiKey: data.apiKey.trim(),
+      ...(data.availableModels ? { availableModels: data.availableModels } : {}),
       ...(data.adminApiKey ? { adminApiKey: data.adminApiKey.trim() } : {}), baseUrl: `${url.origin}/v1` };
   } catch {
     throw new Error("Claude App needs a private (0600) session JSON with email, baseUrl (HTTPS or loopback HTTP), a local bridge apiKey and modelSelection (explicit or default-only)");

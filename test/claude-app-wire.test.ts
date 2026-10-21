@@ -3,6 +3,15 @@ import { it } from "node:test";
 import { fromBridgeResponse, toBridgeRequest } from "../src/providers/claude-app/wire.js";
 const sse = (data: unknown) => `data: ${JSON.stringify(data)}\n\n`;
 
+it("preserves every explicit effort in the native bridge request", () => {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+    const result = toBridgeRequest({ model: "claude-sonnet-5-5", reasoning_effort: effort,
+      messages: [{ role: "user", content: "hello" }] });
+    assert.equal(result.model, "claude-sonnet-5-5");
+    assert.deepEqual(result.output_config, { effort });
+  }
+});
+
 it("uses the native Messages request and preserves system instructions and limits", () => {
   assert.deepEqual(toBridgeRequest({ model: "default", messages: [
     { role: "system", content: "system" }, { role: "user", content: "question" }, { role: "system", content: "tools" },

@@ -8,7 +8,11 @@ export function prepareRequest(request: Record<string, unknown>): { request: Rec
   if (request.response_format !== undefined || request.audio !== undefined || request.modalities !== undefined || (typeof request.n === "number" && request.n > 1)) {
     throw new Error("Claude App structured output, audio and multiple choices are not supported");
   }
-  if (request.reasoning_effort !== undefined || request.thinking !== undefined) throw new Error("Claude App thinking effort selection is not enabled");
+  if (request.thinking !== undefined) throw new Error("Claude App uses adaptive thinking; choose reasoning_effort instead");
+  if (request.reasoning_effort !== undefined && (typeof request.reasoning_effort !== "string" ||
+    !["low", "medium", "high", "xhigh", "max"].includes(request.reasoning_effort))) {
+    throw new Error("Claude App reasoning_effort must be low, medium, high, xhigh or max");
+  }
   const declarations: Record<string, unknown>[] = [];
   if (request.tools !== undefined && !Array.isArray(request.tools)) throw new Error("Invalid Claude App tools");
   for (const item of request.tools as unknown[] ?? []) {

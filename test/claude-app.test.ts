@@ -321,7 +321,7 @@ it("offers local browser sign-in and keeps remote bridge registration explicit",
   assert.match(html, /fetch\('\/api\/cli-login'/);
 });
 
-it("allows free-account Auto and rejects explicit aliases before sending", async () => {
+it("allows legacy Auto-only sessions and rejects explicit aliases before sending", async () => {
   const previous = process.env.LYOD_CLAUDE_APP_MODELS;
   process.env.LYOD_CLAUDE_APP_MODELS = "auto,fixture-thinking";
   try {
@@ -335,4 +335,53 @@ it("allows free-account Auto and rejects explicit aliases before sending", async
     assert.equal((await claudeAppAdapter.forwardRequest(free, auto, {})).response.status, 200);
     assert.equal(captures.at(-1)!.body.model, "default");
   } finally { process.env.LYOD_CLAUDE_APP_MODELS = previous; }
+});
+
+it("rejects Sonnet without confirmed model or default effort before sending", async () => {
+  const previous = process.env.LYOD_CLAUDE_APP_MODELS;
+  process.env.LYOD_CLAUDE_APP_MODELS = "sonnet-5-5";
+  try {
+    const start = captures.length;
+    for (const availableModels of [undefined, [], [{ id: "claude-sonnet-5-5", efforts: ["low"] }]]) {
+      const path = join(directory, "unconfirmed-sonnet.json");
+      await writeFile(path, JSON.stringify({ email: "free@example.test", baseUrl, apiKey: "free-key",
+        modelSelection: "explicit", availableModels }), { mode: 0o600 });
+      const candidate = { ...account, config: await accountFromSessionFile(path) };
+      const result = await claudeAppAdapter.forwardRequest(candidate, { ...body("hello"), model: "claude-app-sonnet-5-5" }, {});
+      assert.ok([400, 403].includes(result.response.status));
+      await result.response.body?.cancel();
+    }
+    assert.equal(captures.length, start);
+  } finally { process.env.LYOD_CLAUDE_APP_MODELS = previous; }
+});
+
+it("serves explicit Sonnet and every catalog effort through the public API for a free account", async () => {
+  const previous = process.env.LYOD_CLAUDE_APP_MODELS;
+  const previousAccount = selectedAccount;
+  process.env.LYOD_CLAUDE_APP_MODELS = "sonnet-5-5,auto,fixture-thinking";
+  const efforts = ["low", "medium", "high", "xhigh", "max"];
+  try {
+    const path = join(directory, "sonnet.json");
+    await writeFile(path, JSON.stringify({ email: "free@example.test", baseUrl, apiKey: "free-key", modelSelection: "explicit",
+      availableModels: [{ id: "claude-sonnet-5-5", efforts }] }), { mode: 0o600 });
+    selectedAccount = { ...account, config: await accountFromSessionFile(path) };
+    assert.equal(upstreamModel("claude-app-sonnet-5-5"), "claude-sonnet-5-5");
+    for (const effort of efforts) {
+      const response = await post("/v1/chat/completions", { model: "claude-app-sonnet-5-5",
+        reasoning_effort: effort, messages: [{ role: "user", content: "hello" }] });
+      assert.equal(response.status, 200);
+      await response.json();
+      assert.equal(captures.at(-1)!.body.model, "claude-sonnet-5-5");
+      assert.deepEqual(captures.at(-1)!.body.output_config, { effort });
+    }
+    const response = await post("/v1/chat/completions", { model: "claude-app-sonnet-5-5", messages: [{ role: "user", content: "hello" }] });
+    assert.equal(response.status, 200); await response.json();
+    assert.deepEqual(captures.at(-1)!.body.output_config, { effort: "medium" });
+    const start = captures.length;
+    for (const [id, effort] of [["claude-app-sonnet-5-5", "invalid"], [model, "high"], ["claude-app-auto", "high"]]) {
+      const response = await post("/v1/chat/completions", { model: id, reasoning_effort: effort, messages: [{ role: "user", content: "hello" }] });
+      assert.ok([400, 403].includes(response.status)); await response.body?.cancel();
+    }
+    assert.equal(captures.length, start);
+  } finally { process.env.LYOD_CLAUDE_APP_MODELS = previous; selectedAccount = previousAccount; }
 });

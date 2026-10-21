@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the pinned ClewdR with Lyod's explicit rate-limit handling patch."""
+"""Build pinned ClewdR with Lyod's rate-limit and explicit web model/effort patch."""
 import argparse
 import os
 from pathlib import Path
@@ -30,12 +30,15 @@ def main():
     else:
         subprocess.run(["git", "apply", "--check", str(PATCH)], cwd=source, check=True)
         subprocess.run(["git", "apply", str(PATCH)], cwd=source, check=True)
-    subprocess.run(["cargo", "test", "--locked", "-p", "clewdr", "lyod_rate_limit_tests"], cwd=source, check=True)
+    subprocess.run(["cargo", "test", "--locked", "-p", "clewdr", "lyod_"], cwd=source, check=True)
     subprocess.run(["cargo", "build", "--locked", "-p", "clewdr"], cwd=source, check=True)
     TARGET.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(dir=TARGET.parent)
     try:
-        with os.fdopen(fd, "wb") as output, (source / "target/debug/clewdr").open("rb") as binary:
+        target = Path(os.environ.get("CARGO_TARGET_DIR", source / "target"))
+        if not target.is_absolute():
+            target = source / target
+        with os.fdopen(fd, "wb") as output, (target / "debug/clewdr").open("rb") as binary:
             shutil.copyfileobj(binary, output)
             output.flush()
             os.fsync(output.fileno())

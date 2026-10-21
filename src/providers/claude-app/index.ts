@@ -83,9 +83,17 @@ export const claudeAppAdapter: ProviderAdapter = {
       return { endpoint: "claude-app", response: Response.json({ error: { message:
         "This Claude App account supports Auto only; explicit model selection is unavailable" } }, { status: 403 }) };
     }
+    const capability = session.availableModels?.find((entry) => entry.id === model);
+    if (model !== "auto" && (session.availableModels || model === "claude-sonnet-5-5") && !capability) {
+      return { endpoint: "claude-app", response: Response.json({ error: { message: "Selected Claude model is unavailable for this account" } }, { status: 403 }) };
+    }
     const request = body.request as Record<string, unknown>;
     if (!request || !Array.isArray(request.messages)) {
       return { endpoint: "claude-app", response: Response.json({ error: { message: "Claude App requires a Chat Completions request" } }, { status: 400 }) };
+    }
+    const effort = request.reasoning_effort ?? (model === "claude-sonnet-5-5" ? "medium" : undefined);
+    if (effort !== undefined && (!capability || !capability.efforts.includes(String(effort)))) {
+      return { endpoint: "claude-app", response: Response.json({ error: { message: "Selected Claude effort is unavailable for this account and model" } }, { status: 400 }) };
     }
     let prepared;
     try { prepared = prepareRequest(request); }
@@ -99,7 +107,9 @@ export const claudeAppAdapter: ProviderAdapter = {
         method: "POST", redirect: "error", signal, timeoutMs: 600_000,
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.apiKey}`,
           Accept: request.stream === true ? "text/event-stream" : "application/json" },
-        body: JSON.stringify(toBridgeRequest({ ...prepared.request, model: model === "auto" ? "default" : model })),
+        body: JSON.stringify(toBridgeRequest({ ...prepared.request,
+          ...(effort !== undefined ? { reasoning_effort: effort } : {}),
+          model: model === "auto" ? "default" : model })),
       });
       // Upstream errors may echo authentication/session data. Keep status and
       // retry-after only, never forward an arbitrary sidecar error body.

@@ -11,7 +11,9 @@ const sse = (content: string, finish?: string) => `data: ${JSON.stringify({ choi
 
 it("rejects unsupported attachments, structured output and invalid declarations before network access", () => {
   assert.throws(() => prepareRequest({ ...request, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "file:///private" } }] }] }), /attachments/);
-  assert.throws(() => prepareRequest({ ...request, reasoning_effort: "high" }), /effort/);
+  assert.throws(() => prepareRequest({ ...request, reasoning_effort: "invalid" }), /effort/);
+  assert.throws(() => prepareRequest({ ...request, reasoning_effort: ["high"] }), /effort/);
+  assert.throws(() => prepareRequest({ ...request, thinking: { type: "disabled" } }), /adaptive/);
   assert.throws(() => prepareRequest({ ...request, response_format: { type: "json_schema" } }), /structured/);
   assert.throws(() => prepareRequest({ ...request, tools: [tool, tool] }), /duplicate/);
   assert.throws(() => prepareRequest({ ...request, tool_choice: { type: "function", function: { name: "unknown" } } }), /Unknown required tool/);

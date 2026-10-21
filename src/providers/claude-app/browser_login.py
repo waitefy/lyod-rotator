@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -81,13 +82,34 @@ def identity(cookies, proxy=None):
             account = r.json()["account"]
             email = ui.email_value(account["email_address"])
             org = next(m["organization"] for m in account["memberships"] if "chat" in m["organization"].get("capabilities", []))
-            capabilities = org["capabilities"]
-            explicit = any(any(t in c for t in ("pro", "enterprise", "raven", "max")) for c in capabilities)
-            return {"email": email, "modelSelection": "explicit" if explicit else "default-only"}
+            catalog = client.get(f'https://claude.ai/api/organizations/{org["uuid"]}/model_selector/chat',
+                                 timeout=45, allow_redirects=False)
+            if catalog.status_code != 200:
+                raise LoginError("Claude не подтвердил список моделей аккаунта. Сохранённые подключения не изменены.")
+            models = available_models(catalog.json())
+            if not models:
+                raise LoginError("Claude не предоставил доступных моделей для этого аккаунта.")
+            return {"email": email, "modelSelection": "explicit", "availableModels": models}
     except LoginError:
         raise
     except Exception:
         raise LoginError("Не удалось проверить аккаунт Claude. Профиль сохранён; повторите позже.") from None
+
+
+def available_models(catalog):
+    """Use the account's website selector, never infer entitlement from its plan."""
+    surface = next((entry for entry in catalog.get("model_selector_config", []) if entry.get("id") == "chat"), {})
+    result = []
+    for model in surface.get("models", []):
+        name = model.get("id", "")
+        if (model.get("disabled") or model.get("disabled_reason") or
+                not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]{1,128}", name)):
+            continue
+        efforts = [entry["id"] for entry in model.get("thinking", {}).get("effort_options", [])
+                   if entry.get("id") in ("low", "medium", "high", "xhigh", "max") and
+                   not entry.get("disabled") and not entry.get("disabled_reason")]
+        result.append({"id": name, "efforts": efforts})
+    return result
 
 
 def config_text(connection, cookie, proxy=None):
@@ -97,7 +119,7 @@ def config_text(connection, cookie, proxy=None):
                   rproxy="https://claude.ai/", no_fs=True, log_to_file=False,
                   check_update=False, auto_update=False, max_retries=0,
                   preserve_chats=False, web_search=False, use_real_roles=False,
-                  skip_non_pro=connection["modelSelection"] == "explicit")
+                  skip_non_pro=False)
     if proxy:
         values["proxy"] = proxy
     return "\n".join(key + " = " + json.dumps(value) for key, value in values.items()) + "\n\n[[cookie_array]]\ncookie = " + json.dumps(cookie) + "\n"
@@ -177,7 +199,7 @@ def connect(settings, expected=None, progress=lambda text: None):
             raise LoginError("Ожидался " + expected + ", выполнен вход в " + session["email"] + ". Другие аккаунты не изменены.")
         directory, connection = allocate(root, session["email"])
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        connection.update(modelSelection=session["modelSelection"])
+        connection.update(modelSelection=session["modelSelection"], availableModels=session.get("availableModels", []))
         connection.setdefault("adminApiKey", secrets.token_urlsafe(32))
         config, descriptor = directory / "clewdr.toml", directory / "session.json"
         old_config = config.read_bytes() if config.exists() else None
