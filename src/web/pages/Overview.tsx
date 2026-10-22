@@ -5,7 +5,7 @@ import { type JSX } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import type { DashboardOverview } from "../../dashboard-types.js";
 import { buildAttention, SEVERITY_ICON, SEVERITY_TONE, type AttentionAction, type AttentionItem } from "../lib/attention.js";
-import { buildProviderGroups, summarizeLocalBudgets, type ProviderGroup, type ModelPool, type ModelRoute } from "../lib/pools.js";
+import { buildProviderGroups, summarizeLocalBudgets, summarizeProviderRoutes, type ProviderGroup, type ModelPool, type ModelRoute } from "../lib/pools.js";
 import { formatClock, formatCompact, formatCount, formatDuration, formatMs, formatUsd, pluralize } from "../lib/format.js";
 import {
   canServe,
@@ -365,7 +365,7 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
             </thead>
             <tbody>
               {providers.flatMap((group) => [
-                ...(group.routes.length ? [<AppProviderRow key={`${group.provider}-route`} group={group} />] : []),
+                ...(group.routes.length ? [<AppProviderRow key={`${group.provider}-route`} group={group} expanded={open === group.provider} onToggle={() => setOpen(open === group.provider ? null : group.provider)} />] : []),
                 ...group.pools.map((pool) => (
                   <PoolRow key={pool.key} pool={pool} expanded={open === pool.key} onToggle={() => setOpen(open === pool.key ? null : pool.key)} />
                 )),
@@ -389,36 +389,50 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
   );
 }
 
-function AppProviderRow({ group }: { group: ProviderGroup }): JSX.Element {
-  const [selectedModel, setSelectedModel] = useState(group.routes[0].modelId);
-  const route = group.routes.find((entry) => entry.modelId === selectedModel) ?? group.routes[0];
+function AppProviderRow({ group, expanded, onToggle }: { group: ProviderGroup; expanded: boolean; onToggle: () => void }): JSX.Element {
   const budget = summarizeLocalBudgets(group, now.value);
-  return <tr class="pool-row app-route-row" data-provider={group.provider} data-model={route.modelId}>
-    <th scope="row">
-      <div class="pool-name"><span>{providerLabel(group.provider)}</span>{budget && <Tag>Local budget</Tag>}</div>
-      <select class="select route-model-select" aria-label={`${providerLabel(group.provider)} routing model`}
-        value={route.modelId} onChange={(event) => setSelectedModel(event.currentTarget.value)}>
-        {group.routes.map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.modelId}</option>)}
-      </select>
-      <div class="cell-sub">{route.diagnostics?.policy ?? "Diagnostics unavailable"}</div>
-    </th>
-    <td data-label="Remaining">
-      {budget ? <>
-        <div class="pool-capacity">
-          <Meter value={budget.percent} label={`${providerLabel(group.provider)} local request budget remaining`} />
-          <span class="num">{budget.percent}%</span>
-        </div>
-        <div class="cell-sub">{formatCount(budget.remaining)} / {formatCount(budget.limit)} requests remaining</div>
-        <div class="cell-sub">{pluralize(budget.members.length, "account")} with local budget</div>
-      </> : <span class="muted">Quota unavailable</span>}
-    </td>
-    <RouteServing route={route} />
-    <RouteCandidates route={route} />
-    <td data-label="Next reset"><Countdown until={budget?.nextResetAt ?? null} /></td>
-    <td class="hide-sm muted">—</td>
-    <td class="cell-action">{budget && <Button size="sm" variant="ghost" icon="chevronRight" iconOnly
-      onClick={() => navigate(accountPath(budget.members[0].account.email))}>Edit local budget</Button>}</td>
-  </tr>;
+  const summary = summarizeProviderRoutes(group);
+  const name = masker.value.name;
+  const accounts = (members: ProviderGroup["accounts"], subtle = false) => members.map((account, index) =>
+    <span key={account.id ?? account.email}>{index > 0 && ", "}<Link href={accountPath(account.email)}
+      class={`account-link${subtle ? " subtle" : ""}`}>{name(account.email)}</Link></span>);
+  return <>
+    <tr class={`pool-row app-route-row${expanded ? " is-open" : ""}`} data-provider={group.provider}>
+      <th scope="row"><div class="pool-name"><span>{providerLabel(group.provider)}</span>{budget && <Tag>Local budget</Tag>}</div></th>
+      <td data-label="Remaining">
+        {budget ? <>
+          <div class="pool-capacity">
+            <Meter value={budget.percent} label={`${providerLabel(group.provider)} local request budget remaining`} />
+            <span class="num">{budget.percent}%</span>
+          </div>
+          <div class="cell-sub">{formatCount(budget.remaining)} / {formatCount(budget.limit)} requests remaining</div>
+          <div class="cell-sub">{pluralize(budget.members.length, "account")} with local budget</div>
+        </> : <span class="muted">Quota unavailable</span>}
+      </td>
+      <td data-label="Serving">{summary.serving.length ? accounts(summary.serving) : <span class="muted">—</span>}</td>
+      <td class="hide-sm" data-label="Next up" title="Server-ranked fallback accounts. Model-specific differences are shown in routing details; this is not a queue of HTTP requests.">
+        {summary.state === "varies" ? <span class="muted">Varies by model</span>
+          : summary.state === "unavailable" ? <span class="muted">Diagnostics unavailable</span>
+          : summary.nextUp.length ? accounts(summary.nextUp.slice(0, 2), true)
+          : <span class="muted" title={summary.available ? "No additional eligible account" : "No eligible account"}>—</span>}
+      </td>
+      <td data-label="Next reset"><Countdown until={budget?.nextResetAt ?? null} /></td>
+      <td class="hide-sm muted">—</td>
+      <td class="cell-action"><Button size="sm" variant="ghost" icon={expanded ? "chevronDown" : "chevronRight"}
+        iconOnly aria-expanded={expanded} onClick={onToggle}>{expanded ? "Hide routing decisions" : "Show routing decisions"}</Button></td>
+    </tr>
+    {expanded && <tr class="pool-detail"><td colSpan={7}>
+      <div class="decisions">
+        <p class="decisions-summary">One shared local request budget. Routing eligibility and account order can differ by model.</p>
+        <table class="table table-compact">
+          <thead><tr><th scope="col">Model</th><th scope="col">Serving</th><th scope="col">Next up</th></tr></thead>
+          <tbody>{group.routes.map((route) => <tr key={route.key}><th scope="row">{route.modelId}</th>
+            <RouteServing route={route} /><RouteCandidates route={route} /></tr>)}</tbody>
+        </table>
+        {budget && <Button size="sm" variant="ghost" onClick={() => navigate(accountPath(budget.members[0].account.email))}>Edit local budget</Button>}
+      </div>
+    </td></tr>}
+  </>;
 }
 
 function RouteServing({ route }: { route: ModelRoute }): JSX.Element {
@@ -437,7 +451,7 @@ function RouteServing({ route }: { route: ModelRoute }): JSX.Element {
 function RouteCandidates({ route }: { route: ModelRoute }): JSX.Element {
   const name = masker.value.name;
   const diag = route.diagnostics;
-  return <td data-label="Next up" title="Eligible fallback accounts for the selected model, ranked on the server. Not waiting HTTP requests or a guarantee of the next admission.">
+  return <td data-label="Next up" title="Eligible fallback accounts for this model, ranked on the server. Not waiting HTTP requests or a guarantee of the next admission.">
       {!diag ? <span class="muted">Diagnostics unavailable</span>
         : route.nextUp.length ? route.nextUp.map((account, index) => <div key={account.id}>
           <span class="muted">{index + 1}. </span><Link href={accountPath(account.email)} class="account-link subtle">{name(account.email)}</Link>

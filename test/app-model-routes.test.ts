@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import type { AccountConfig, AccountRuntime, Config, ModelRouteStatus, RoutingPolicy } from "../src/types.js";
 import { buildOverview } from "../src/dashboard-live.js";
-import { buildProviderGroups, summarizeLocalBudgets } from "../src/web/lib/pools.js";
+import { buildProviderGroups, summarizeLocalBudgets, summarizeProviderRoutes } from "../src/web/lib/pools.js";
 import { createMasker } from "../src/web/lib/mask.js";
 import { buildAttention } from "../src/web/lib/attention.js";
 import type { AccountRotator as RotatorClass, getAccountIdentity as AccountIdentityFunction } from "../src/rotator.js";
@@ -99,6 +99,25 @@ function release(f: AppFixture, account: AccountRuntime, model = f.model) {
 }
 
 describe("concrete App model routes", () => {
+  it("summarizes shared orders without inventing a provider queue when models disagree", async () => {
+    const f = fixture("chatgpt-app");
+    const group = () => buildProviderGroups(buildOverview(f.rotator.getStatus(), Date.now(), { database: false }), Date.now())
+      .find((entry) => entry.provider === f.provider)!;
+    assert.equal(summarizeProviderRoutes(group()).state, "shared");
+    assert.equal(summarizeProviderRoutes(group()).nextUp.length, 3);
+    const first = await f.rotator.getActiveAccount(f.model, undefined, f.provider);
+    const second = await f.rotator.getActiveAccount(f.otherModel, undefined, f.provider);
+    assert.ok(first && second);
+    const busy = summarizeProviderRoutes(group());
+    assert.deepEqual(new Set(busy.serving.map((account) => account.id)), new Set([first, second].map(getAccountIdentity)));
+    const g = group();
+    g.routes[1].nextUp = [...g.routes[0].nextUp].reverse();
+    assert.equal(summarizeProviderRoutes(g).state, "varies");
+    assert.deepEqual(summarizeProviderRoutes(g).nextUp, []);
+    g.routes[1].diagnostics = null;
+    assert.equal(summarizeProviderRoutes(g).state, "unavailable");
+    release(f, first); release(f, second, f.otherModel);
+  });
   for (const provider of providers) {
     it(`${provider}: tracks multiple workers separately from idle assignments and other models`, async () => {
       const f = fixture(provider);

@@ -232,6 +232,21 @@ export interface ProviderGroup {
   pools: ModelPool[];
 }
 
+/** Only present a provider-wide order when every model agrees with it. */
+export function summarizeProviderRoutes(group: ProviderGroup) {
+  const serving = [...new Map(group.routes.flatMap((route) => route.serving)
+    .map((account) => [account.id ?? account.email, account])).values()];
+  const first = group.routes[0];
+  const complete = !!first && group.routes.every((route) => route.diagnostics !== null);
+  const signature = (route: ModelRoute) => JSON.stringify([
+    route.nextUp.map((account) => account.id ?? account.email),
+    !!route.diagnostics?.availableCandidates,
+  ]);
+  const shared = complete && group.routes.every((route) => signature(route) === signature(first));
+  return { serving, state: !complete ? "unavailable" as const : shared ? "shared" as const : "varies" as const,
+    nextUp: shared ? first.nextUp : [], available: shared && !!first.diagnostics?.availableCandidates };
+}
+
 /** Operator budgets are request counts, independent of native quota and account tier. */
 export function summarizeLocalBudgets(group: ProviderGroup, now: number) {
   const members = group.accounts.flatMap((account) => {
