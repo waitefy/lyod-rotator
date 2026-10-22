@@ -5,7 +5,7 @@ import { type JSX } from "preact";
 import { useMemo, useState } from "preact/hooks";
 import type { DashboardOverview } from "../../dashboard-types.js";
 import { buildAttention, SEVERITY_ICON, SEVERITY_TONE, type AttentionAction, type AttentionItem } from "../lib/attention.js";
-import { buildProviderGroups, summarizeLocalBudgets, type ProviderGroup, type ModelPool } from "../lib/pools.js";
+import { buildProviderGroups, summarizeLocalBudgets, type ProviderGroup, type ModelPool, type ModelRoute } from "../lib/pools.js";
 import { formatClock, formatCompact, formatCount, formatDuration, formatMs, formatUsd, pluralize } from "../lib/format.js";
 import {
   canServe,
@@ -365,16 +365,18 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
             </thead>
             <tbody>
               {providers.flatMap((group) => [
+                ...(group.routes.length ? [<AppProviderRow key={`${group.provider}-route`} group={group} />] : []),
                 ...group.pools.map((pool) => (
                   <PoolRow key={pool.key} pool={pool} expanded={open === pool.key} onToggle={() => setOpen(open === pool.key ? null : pool.key)} />
                 )),
-                ...(summarizeLocalBudgets(group, now.value) ? [<LocalBudgetRow key={`${group.provider}-local`} group={group} />] : []),
-                ...(group.pools.length === 0 && !summarizeLocalBudgets(group, now.value) ? [
+                ...(group.routes.length === 0 && summarizeLocalBudgets(group, now.value) ? [<LocalBudgetRow key={`${group.provider}-local`} group={group} />] : []),
+                ...(group.routes.length === 0 && group.pools.length === 0 && !summarizeLocalBudgets(group, now.value) ? [
                   <tr key={group.provider}>
                     <th scope="row">{providerLabel(group.provider)}</th>
                     <td colSpan={6} class="muted">
                       {pluralize(group.accounts.length, "connected account")}
                       {" · Quota unavailable"}
+                      {["chatgpt-app", "claude-app", "qwen-app", "deepseek-app"].includes(group.provider) && " · No model route diagnostics"}
                     </td>
                   </tr>
                 ] : []),
@@ -385,6 +387,63 @@ function ProvidersPanel({ providers }: { providers: ProviderGroup[] }): JSX.Elem
       )}
     </Panel>
   );
+}
+
+function AppProviderRow({ group }: { group: ProviderGroup }): JSX.Element {
+  const [selectedModel, setSelectedModel] = useState(group.routes[0].modelId);
+  const route = group.routes.find((entry) => entry.modelId === selectedModel) ?? group.routes[0];
+  const budget = summarizeLocalBudgets(group, now.value);
+  return <tr class="pool-row app-route-row" data-provider={group.provider} data-model={route.modelId}>
+    <th scope="row">
+      <div class="pool-name"><span>{providerLabel(group.provider)}</span>{budget && <Tag>Local budget</Tag>}</div>
+      <select class="select route-model-select" aria-label={`${providerLabel(group.provider)} routing model`}
+        value={route.modelId} onChange={(event) => setSelectedModel(event.currentTarget.value)}>
+        {group.routes.map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.modelId}</option>)}
+      </select>
+      <div class="cell-sub">{route.diagnostics?.policy ?? "Diagnostics unavailable"}</div>
+    </th>
+    <td data-label="Remaining">
+      {budget ? <>
+        <div class="pool-capacity">
+          <Meter value={budget.percent} label={`${providerLabel(group.provider)} local request budget remaining`} />
+          <span class="num">{budget.percent}%</span>
+        </div>
+        <div class="cell-sub">{formatCount(budget.remaining)} / {formatCount(budget.limit)} requests remaining</div>
+        <div class="cell-sub">{pluralize(budget.members.length, "account")} with local budget</div>
+      </> : <span class="muted">Quota unavailable</span>}
+    </td>
+    <RouteServing route={route} />
+    <RouteCandidates route={route} />
+    <td data-label="Next reset"><Countdown until={budget?.nextResetAt ?? null} /></td>
+    <td class="hide-sm muted">—</td>
+    <td class="cell-action">{budget && <Button size="sm" variant="ghost" icon="chevronRight" iconOnly
+      onClick={() => navigate(accountPath(budget.members[0].account.email))}>Edit local budget</Button>}</td>
+  </tr>;
+}
+
+function RouteServing({ route }: { route: ModelRoute }): JSX.Element {
+  const name = masker.value.name;
+  return <td data-label="Serving">
+      {route.serving.length ? route.serving.map((account) => <div key={account.id}>
+        <Link href={accountPath(account.email)} class="account-link">{name(account.email)}</Link>
+        <span class="cell-sub"> · In flight</span>
+      </div>) : <span class="muted">Nothing serving</span>}
+      {route.assigned && !route.serving.some((account) => account.id === route.assigned!.id) && <div class="cell-sub">
+        Idle assignment: <Link href={accountPath(route.assigned.email)} class="account-link subtle">{name(route.assigned.email)}</Link>
+      </div>}
+    </td>;
+}
+
+function RouteCandidates({ route }: { route: ModelRoute }): JSX.Element {
+  const name = masker.value.name;
+  const diag = route.diagnostics;
+  return <td data-label="Next up" title="Eligible fallback accounts for the selected model, ranked on the server. Not waiting HTTP requests or a guarantee of the next admission.">
+      {!diag ? <span class="muted">Diagnostics unavailable</span>
+        : route.nextUp.length ? route.nextUp.map((account, index) => <div key={account.id}>
+          <span class="muted">{index + 1}. </span><Link href={accountPath(account.email)} class="account-link subtle">{name(account.email)}</Link>
+        </div>) : <span class="muted">{diag.availableCandidates ? "No additional eligible account" : "No eligible account"}</span>}
+      {diag && <div class="cell-sub">{diag.rankingMode === "concurrent" ? "By load" : "On rotation"} · {pluralize(route.nextUp.length, "candidate")}</div>}
+    </td>;
 }
 
 function LocalBudgetRow({ group }: { group: ProviderGroup }): JSX.Element | null {
@@ -400,7 +459,8 @@ function LocalBudgetRow({ group }: { group: ProviderGroup }): JSX.Element | null
       <div class="cell-sub">{formatCount(budget.remaining)} / {formatCount(budget.limit)} requests remaining</div>
       <div class="cell-sub">{pluralize(budget.members.length, "account")} with local budget</div>
     </td>
-    <td colSpan={2} class="muted">Successful requests through this rotator</td>
+    <td data-label="Serving" class="muted">Diagnostics unavailable</td>
+    <td data-label="Next up" class="muted">Diagnostics unavailable</td>
     <td data-label="Next reset"><Countdown until={budget.nextResetAt} /></td>
     <td class="hide-sm muted">—</td>
     <td class="cell-action"><Button size="sm" variant="ghost" icon="chevronRight" iconOnly

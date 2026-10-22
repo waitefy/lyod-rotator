@@ -167,6 +167,7 @@ export function buildOverview(
     maxConcurrentRequestsPerAccount: status.maxConcurrentRequestsPerAccount,
     totalRequestsAllAccounts: status.totalRequestsAllAccounts,
     activeAccounts: status.activeAccounts || {},
+    modelRoutes: status.modelRoutes,
     accounts,
     protectivePause: {
       until:

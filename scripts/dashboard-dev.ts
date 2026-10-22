@@ -15,8 +15,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
+import type { CustomQuotaStatus, ModelRouteStatus, RoutingModelDiagnostics } from "../src/types.js";
 
 process.env.TUXEVIL_ROTATOR_DASHBOARD_DEV ??= "1";
+process.env.LYOD_CHATGPT_APP_MODELS ??= "gpt-5.6-sol,gpt-5.6-terra";
 process.env.PI_ROTATOR_TELEMETRY = "off";
 const PORT = Number(process.env.MOCK_PORT || process.env.PORT || 8899);
 const TOKEN = process.env.MOCK_TOKEN ?? "dev-token";
@@ -105,6 +107,7 @@ interface MockAccount {
   allowFreshWindowStartsOverride: boolean;
   dailyRequestCount: number;
   disabledProviders?: string[];
+  customQuotas?: CustomQuotaStatus[];
 }
 
 const accounts: MockAccount[] = Array.from({ length: count }, (_, i) => {
@@ -138,6 +141,33 @@ const accounts: MockAccount[] = Array.from({ length: count }, (_, i) => {
     dailyRequestCount: Math.round(rand() * 200),
   };
 });
+
+// Deterministic App fixtures: concurrent workers, idle assignments, model-specific
+// membership and a single-account route, without touching a real bridge.
+const APP_MODELS: Record<string, string[]> = {
+  "chatgpt-app": ["chatgpt-app-gpt-5.6-sol", "chatgpt-app-gpt-5.6-terra"],
+  "claude-app": ["claude-app-sonnet-5-5", "claude-app-auto"],
+  "qwen-app": ["qwen-app-qwen3.6-plus", "qwen-app-qwen3.6-max"],
+  "deepseek-app": ["deepseek-app-deepseek-chat"],
+};
+if (count > 0) {
+  for (const [provider, models] of Object.entries(APP_MODELS)) {
+    const size = provider === "deepseek-app" ? 1 : 3;
+    for (let i = 0; i < size; i++) {
+      accounts.push({
+        email: `${provider}-${i + 1}@demo.example`, label: `${provider} ${i + 1}`,
+        provider, status: "ready", tier: "pro", quota: [],
+        totalRequests: 24 + i * 7, requestsSinceRotation: 0, lastUsed: now(),
+        lastError: null, consecutiveErrors: 0, cooldownsByModel: {},
+        inFlightByModel: i < 2 && ["chatgpt-app", "qwen-app"].includes(provider)
+          ? { [`${provider}:${models[0]}`]: 1 } : {},
+        healthScore: 1, allowFreshWindowStartsOverride: false, dailyRequestCount: 24,
+        customQuotas: [{ providerId: provider, requests: 100, windowHours: 5,
+          used: 24 + i * 7, percentRemaining: 76 - i * 7, resetAt: now() + 4 * H }],
+      });
+    }
+  }
+}
 
 const controls = { allowFreshWindowStarts: true, autoWarmupEnabled: false };
 const startedAt = now() - (3 * 24 * H + 4 * H + 12 * M);
@@ -255,6 +285,7 @@ function getStatus() {
   const statusOf = (a: MockAccount) =>
     a.status === "flagged" || a.status === "disabled" ? a.status : allOff(a) ? "off" : a.status === "ready" && activeFor(a).length > 0 ? "active" : a.status;
   const accountStatuses = accounts.map((a) => ({
+    id: a.email,
     email: a.email,
     label: a.label,
     provider: a.provider,
@@ -274,6 +305,7 @@ function getStatus() {
     quota: a.quota,
     inFlightRequests: Object.values(a.inFlightByModel).reduce((s, v) => s + v, 0),
     inFlightByModel: a.inFlightByModel,
+    customQuotas: a.customQuotas,
     proDetected: false,
     tier: a.tier,
     healthScore: a.healthScore,
@@ -324,6 +356,49 @@ function getStatus() {
       accounts: entries,
     };
   }
+  const modelRoutes: ModelRouteStatus[] = [];
+  for (const [providerId, models] of Object.entries(APP_MODELS)) {
+    if (modelCatalog.isProviderTurnedOff(modelConfig(), providerId)) continue;
+    const members = accounts.filter((a) => a.provider === providerId);
+    if (!members.length) continue;
+    for (const [modelIndex, modelId] of models.entries()) {
+      if (!modelCatalog.isModelServed(rotator, providerId, modelId)) continue;
+      const diagnosticKey = `${providerId}:${modelId}`;
+      const poolKey = ["chatgpt-app", "claude-app"].includes(providerId) ? providerId : diagnosticKey;
+      const serving = members.filter((a) => (a.inFlightByModel[diagnosticKey] ?? 0) > 0);
+      const assigned = serving.at(-1) ?? (modelIndex === 0 ? members[0] : members.at(-1));
+      const entries: RoutingModelDiagnostics["accounts"] = members.map((a, index) => {
+        const rejectedReason = a.status === "disabled" ? "disabled" : a.status === "flagged" ? "flagged"
+          : a.disabledProviders?.includes(providerId) ? "provider-ineligible"
+          : a.status === "cooldown" ? "cooldown"
+          : pauseUntil > t || (providerId === "qwen-app" && modelIndex > 0 && index !== 1) ? "provider-ineligible"
+          : a.customQuotas?.some((budget) => budget.used >= budget.requests) ? "provider-ineligible" : null;
+        return {
+          id: a.email, email: a.email, label: a.label, status: statusOf(a) as "ready",
+          score: rejectedReason ? null : 100 - index, timerPriority: 0, quota: 100,
+          tier: "pro", healthScore: 1,
+          healthBreakdown: { quotaComponent: 1, errorPenalty: 0, cooldownPenalty: 0, availabilityPenalty: 0, score: 1 },
+          distance: index + 1, tokenBucket: { enabled: false, tokens: 5, capacity: 5, nextRefillInMs: 0 },
+          rejectedReason, rejectedDetail: rejectedReason ? "Account unavailable for this model" : null,
+        };
+      });
+      const eligible = entries.filter((entry) => !entry.rejectedReason);
+      const ranked = eligible.filter((entry) => serving.length > 0 || entry.id !== assigned?.email)
+        .sort((a, b) => (members.find((m) => m.email === a.id)?.inFlightByModel[diagnosticKey] ?? 0)
+          - (members.find((m) => m.email === b.id)?.inFlightByModel[diagnosticKey] ?? 0));
+      routingDiagnostics[diagnosticKey] = {
+        modelKey: poolKey, policy: config.routingPolicy, rankingMode: serving.length ? "concurrent" : "rotation",
+        selectedEmail: ranked[0]?.email ?? eligible[0]?.email ?? null, rankedAccountIds: ranked.map((entry) => entry.id!),
+        reason: ranked.length ? `Eligible fallback ranking using ${serving.length ? "concurrent load/cursor" : config.routingPolicy}`
+          : "No eligible fallback beyond the current assignment.",
+        availableCandidates: eligible.length, rejectedCandidates: entries.length - eligible.length, accounts: entries,
+      };
+      modelRoutes.push({
+        modelId, providerId, poolKey, diagnosticKey, servingAccountIds: serving.map((a) => a.email),
+        assignedAccountId: eligible.some((entry) => entry.id === assigned?.email) ? assigned!.email : null,
+      });
+    }
+  }
   const counts = (s: string) => accountStatuses.filter((a) => a.status === s).length;
   const available = counts("active") + counts("ready");
   const state = pauseUntil > t ? "paused" : available === 0 ? (counts("cooldown") > 0 ? "cooldown_wait" : "stopped") : "healthy";
@@ -344,6 +419,7 @@ function getStatus() {
     operatorControls: controls,
     security: { adminTokenConfigured: Boolean(TOKEN), warning: null, bindHost: "127.0.0.1" },
     routingDiagnostics,
+    modelRoutes,
     ollamaModels: ["glm-5.1", "gpt-oss:120b"],
     codexModels: ["gpt-5.6-terra"],
     modelTierAccess: SCENARIO === "degraded" ? { "gpt-oss:120b": "free", "gemma4:31b": "free", "glm-5.1": "subscription", "kimi-k3": "subscription" } : undefined,

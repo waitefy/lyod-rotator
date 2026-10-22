@@ -215,7 +215,18 @@ export function buildPools(overview: DashboardOverview, now: number): ModelPool[
   );
 }
 
+export interface ModelRoute {
+  key: string;
+  modelId: string;
+  provider: string;
+  serving: DashboardAccount[];
+  assigned: DashboardAccount | null;
+  nextUp: DashboardAccount[];
+  diagnostics: DashboardRoutingDiagnostics | null;
+}
+
 export interface ProviderGroup {
+  routes: ModelRoute[];
   provider: string;
   accounts: DashboardAccount[];
   pools: ModelPool[];
@@ -244,7 +255,7 @@ export function buildProviderGroups(overview: DashboardOverview, now: number): P
   const ensure = (provider: string): ProviderGroup => {
     let group = groups.get(provider);
     if (!group) {
-      group = { provider, accounts: [], pools: [] };
+      group = { provider, accounts: [], pools: [], routes: [] };
       groups.set(provider, group);
     }
     return group;
@@ -257,5 +268,17 @@ export function buildProviderGroups(overview: DashboardOverview, now: number): P
     for (const provider of providers) ensure(provider).accounts.push(account);
   }
   for (const pool of buildPools(overview, now)) ensure(pool.provider).pools.push(pool);
+  const accountById = new Map(overview.accounts.filter((account) => account.id).map((account) => [account.id!, account]));
+  for (const route of overview.modelRoutes ?? []) {
+    const diagnostics = overview.routingDiagnostics[route.diagnosticKey] ?? null;
+    ensure(route.providerId).routes.push({
+      key: route.diagnosticKey, modelId: route.modelId, provider: route.providerId,
+      serving: route.servingAccountIds.map((id) => accountById.get(id)).filter((account): account is DashboardAccount => !!account),
+      assigned: route.assignedAccountId ? accountById.get(route.assignedAccountId) ?? null : null,
+      // No client-side score, account-order, or last-used-model fallback.
+      nextUp: (diagnostics?.rankedAccountIds ?? []).map((id) => accountById.get(id)).filter((account): account is DashboardAccount => !!account),
+      diagnostics: diagnostics?.rankedAccountIds ? diagnostics : null,
+    });
+  }
   return [...groups.values()].sort((a, b) => providerRank(a.provider) - providerRank(b.provider));
 }

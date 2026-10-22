@@ -703,6 +703,8 @@ export interface StatusResponse {
     inContainer?: boolean;
   };
   routingDiagnostics: Record<string, RoutingModelDiagnostics>;
+  /** Concrete App model routes; independent of shared native/local budget pools. */
+  modelRoutes?: ModelRouteStatus[];
   ollamaModels: string[];
   codexModels?: string[];
   // Present only when at least one account carries an ollama credential.
@@ -827,6 +829,17 @@ export interface RoutingAccountDiagnostic {
   rejectedDetail: string | null;
 }
 
+export interface ModelRouteStatus {
+  modelId: string;
+  providerId: string;
+  poolKey: string;
+  diagnosticKey: string;
+  /** Actual admitted workers, including workers now at a concurrency limit. */
+  servingAccountIds: string[];
+  /** Last observed model assignment, only when eligible for this concrete model. */
+  assignedAccountId: string | null;
+}
+
 export interface RoutingModelDiagnostics {
   modelKey: string;
   policy: RoutingPolicy;
@@ -834,6 +847,9 @@ export interface RoutingModelDiagnostics {
   reason: string;
   availableCandidates: number;
   rejectedCandidates: number;
+  /** Authoritative eligible fallback order; not a queue of waiting requests. */
+  rankedAccountIds?: string[];
+  rankingMode?: "rotation" | "concurrent";
   accounts: RoutingAccountDiagnostic[];
 }
 

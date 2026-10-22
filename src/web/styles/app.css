@@ -2624,6 +2624,18 @@ a.hero-metric:hover {
   margin-bottom: 4px;
 }
 
+.route-model-select {
+  width: 100%;
+  max-width: 240px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.app-route-row td[data-label="Serving"],
+.app-route-row td[data-label="Next up"] {
+  overflow-wrap: anywhere;
+}
+
 .pool-capacity {
   display: flex;
   align-items: center;

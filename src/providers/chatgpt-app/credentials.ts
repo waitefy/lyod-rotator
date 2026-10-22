@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { AccountConfig } from "../../types.js";
 import { getCredential } from "../credential-helpers.js";
@@ -32,6 +33,16 @@ export function getSessionFile(config: AccountConfig): string | undefined {
   return getCredential(config, CHATGPT_APP_PROVIDER)?.sessionFile;
 }
 
+/** Local diagnostic snapshot only; never probes the bridge. */
+export function readBridgeSessionSync(path: string | undefined): BridgeSession {
+  try {
+    if (!path || !isAbsolute(path) || path.length > 4096) throw new Error();
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > 16384 || (stat.mode & 0o077) !== 0) throw new Error();
+    return parseBridgeSession(JSON.parse(readFileSync(path, "utf8")));
+  } catch { throw new Error("ChatGPT App bridge session unavailable"); }
+}
+
 /** Secrets stay in a private file; never propagate JSON parser/network errors. */
 export async function readBridgeSession(path: string | undefined): Promise<BridgeSession> {
   try {
@@ -43,6 +54,13 @@ export async function readBridgeSession(path: string | undefined): Promise<Bridg
       if (!stat.isFile() || stat.size > 16384 || (stat.mode & 0o077) !== 0) throw new Error();
       value = JSON.parse(await file.readFile("utf8"));
     } finally { await file.close(); }
+    return parseBridgeSession(value);
+  } catch {
+    throw new Error("ChatGPT App needs a private (0600) session JSON with email, baseUrl (HTTPS or loopback HTTP), and a local bridge apiKey");
+  }
+}
+
+function parseBridgeSession(value: unknown): BridgeSession {
     const data = value as BridgeSession;
     if (!data || typeof data.email !== "string" || !data.email.trim() || data.email.length > 254 ||
       typeof data.apiKey !== "string" || !data.apiKey.trim() || data.apiKey.length > 4096 || /[\r\n]/.test(data.apiKey) ||
@@ -53,9 +71,6 @@ export async function readBridgeSession(path: string | undefined): Promise<Bridg
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))) ||
       url.username || url.password || url.search || url.hash || !["", "/", "/v1", "/v1/"].includes(url.pathname)) throw new Error();
     return { email: data.email.trim(), apiKey: data.apiKey.trim(), baseUrl: `${url.origin}/v1` };
-  } catch {
-    throw new Error("ChatGPT App needs a private (0600) session JSON with email, baseUrl (HTTPS or loopback HTTP), and a local bridge apiKey");
-  }
 }
 
 export async function accountFromSessionFile(path: string): Promise<AccountConfig> {

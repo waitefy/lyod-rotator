@@ -80,6 +80,7 @@ export interface DashboardOverview {
   security: StatusResponse["security"];
   routingHealth: DashboardRoutingHealth;
   routingDiagnostics: Record<string, DashboardRoutingDiagnostics>;
+  modelRoutes?: StatusResponse["modelRoutes"];
   /** Breaker key -> epoch ms when it lifts. */
   circuitBreakers: {
     model: Record<string, number>;

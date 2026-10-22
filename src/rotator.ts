@@ -1,5 +1,6 @@
 import { bindWebAppAccount } from "./providers/web-app/binding.js";
 import { accountFromSessionFile as verifyWebAccount, getSessionFile as webSessionFile, type WebAppProvider } from "./providers/web-app/credentials.js";
+import { APP_ROUTE_PROVIDERS, appRouteAvailabilityError } from "./providers/web-app/route-availability.js";
 import { customQuotaKey, customQuotaSnapshot, isCustomQuotaRule, withInitialCustomQuotas } from "./custom-quota.js";
 import type { CustomQuotaRule, CustomQuotaUsage } from "./types.js";
 import {
@@ -11,6 +12,7 @@ import {
   type HealthScoreBreakdown,
   type ModelQuota,
   type ModelRotationState,
+  type ModelRouteStatus,
   type PersistedState,
   type RoutingAccountDiagnostic,
   type RoutingModelDiagnostics,
@@ -267,6 +269,9 @@ export class AccountRotator {
   private quotaPollCycle: Promise<void> | null = null;
   private inFlightRefreshes = new WeakMap<AccountRuntime, Map<string, Promise<void>>>();
   private requestCursorIndex = -1;
+  // Observational concrete-model activity; never used for admission or balancing.
+  private appRouteWorkers = new WeakMap<AccountRuntime, Record<string, number>>();
+  private appRouteAssignments = new Map<string, AccountRuntime>();
   private requestWaiters: AccountRequestWaiter[] = [];
   private drainingRequestWaiters = false;
   private requestWaiterDrainRequested = false;
@@ -1443,18 +1448,11 @@ export class AccountRotator {
       if (!this.isRoutableForModel(account, modelKey, now)) continue;
       const load = account.inFlightRequests;
       const tier = this.getTierRank(account);
-      const distance = this.requestCursorIndex < 0
-        ? i
-        : (i - this.requestCursorIndex + this.accounts.length) %
-            this.accounts.length || this.accounts.length;
-      // Concurrent balancing must keep tier-first's preference: load-balance
-      // within the best eligible tier, and use lower tiers only as fallback.
-      const betterTier = policy === "tier-first" && tier < bestTier;
-      const sameTier = policy !== "tier-first" || tier === bestTier;
+      const distance = this.concurrentRoutingDistance(i);
       if (
-        betterTier ||
-        (sameTier &&
-          (load < bestLoad || (load === bestLoad && distance < bestDistance)))
+        !best || this.compareConcurrentCandidate(
+          tier, load, distance, bestTier, bestLoad, bestDistance, policy,
+        )
       ) {
         best = account;
         bestLoad = load;
@@ -1464,6 +1462,20 @@ export class AccountRotator {
     }
 
     return best;
+  }
+
+  private concurrentRoutingDistance(index: number): number {
+    return this.requestCursorIndex < 0 ? index
+      : (index - this.requestCursorIndex + this.accounts.length) % this.accounts.length || this.accounts.length;
+  }
+
+  private compareConcurrentCandidate(
+    tier: number, load: number, distance: number,
+    bestTier: number, bestLoad: number, bestDistance: number,
+    policy: Config["routingPolicy"],
+  ): boolean {
+    if (policy === "tier-first" && tier !== bestTier) return tier < bestTier;
+    return load < bestLoad || (load === bestLoad && distance < bestDistance);
   }
 
   countModelAssignment(modelKey: string): void {
@@ -1922,8 +1934,18 @@ export class AccountRotator {
   private buildRoutingDiagnostics(
     modelKey: string,
     now: number,
+    concreteModel?: string,
   ): RoutingModelDiagnostics {
     const policy = this.config.routingPolicy || "timer-first";
+    const providerId = getProviderIdForPoolKey(modelKey);
+    const concurrent = !!concreteModel && this.accounts.some((account) => account.inFlightRequests > 0);
+    const observedAssignment = concreteModel && this.appRouteAssignments.get(`${providerId}:${concreteModel}`);
+    const excludedIndex = observedAssignment ? this.accounts.indexOf(observedAssignment)
+      : concreteModel && modelKey === `${providerId}:${concreteModel}`
+        ? this.modelState.get(modelKey)?.activeAccountIndex ?? -1 : -1;
+    const ranked: Array<{ id: string; email: string; index: number; load: number; metrics: {
+      priority: number; quota: number; tier: number; health: number; distance: number; tokenRatio: number; hybridScore: number;
+    } }> = [];
     let selectedEmail: string | null = null;
     let selectedScore = -Infinity;
     let selectedMetrics: {
@@ -1948,19 +1970,26 @@ export class AccountRotator {
           activeForModels.push(model);
       }
       const status = this.getAccountStatusForUi(account, now, activeForModels);
-      const rejection = this.getRoutingRejectionForModel(
+      let rejection = this.getRoutingRejectionForModel(
         account,
         modelKey,
         now,
         policy,
       );
+      if (!rejection && concreteModel) {
+        const detail = appRouteAvailabilityError(account, providerId, concreteModel);
+        if (detail) rejection = { reason: "provider-ineligible", detail };
+        else if (this.isProtectivePauseActive(now))
+          rejection = { reason: "provider-ineligible", detail: "routing is protectively paused" };
+      }
       const snapshot = this.getTokenBucketSnapshot(account, now);
       const priority = rejection
         ? null
         : this.getModelTimerPriority(account, modelKey);
       const quota = rejection ? null : this.getModelQuota(account, modelKey);
       const tierRank = this.getTierRank(account);
-      const distance = i + 1;
+      const distance = concurrent ? this.concurrentRoutingDistance(i)
+        : excludedIndex >= 0 ? (i - excludedIndex + this.accounts.length) % this.accounts.length : i + 1;
       const healthBreakdown = this.getHealthScoreBreakdown(account);
       const tokenRatio =
         snapshot.capacity > 0 ? snapshot.tokens / snapshot.capacity : 0;
@@ -1971,7 +2000,7 @@ export class AccountRotator {
               priority,
               quota,
               tierRank,
-              healthBreakdown.score,
+              concreteModel ? account.healthScore : healthBreakdown.score,
               tokenRatio,
               distance,
             );
@@ -2004,11 +2033,15 @@ export class AccountRotator {
         priority,
         quota,
         tier: tierRank,
-        health: healthBreakdown.score,
+        health: concreteModel ? account.healthScore : healthBreakdown.score,
         distance,
         tokenRatio,
         hybridScore,
       };
+      if (concreteModel && (concurrent || i !== excludedIndex)) {
+        ranked.push({ id: getAccountIdentity(account), email: account.config.email, index: i,
+          load: account.inFlightRequests, metrics });
+      }
       if (
         !selectedMetrics ||
         this.compareRoutingCandidate(metrics, selectedMetrics, policy)
@@ -2017,6 +2050,22 @@ export class AccountRotator {
         selectedScore = hybridScore;
         selectedEmail = account.config.email;
       }
+    }
+    if (concreteModel) {
+      ranked.sort((a, b) => {
+        const better = concurrent
+          ? this.compareConcurrentCandidate(a.metrics.tier, a.load, a.metrics.distance,
+              b.metrics.tier, b.load, b.metrics.distance, policy)
+          : this.compareRoutingCandidate(a.metrics, b.metrics, policy);
+        const worse = concurrent
+          ? this.compareConcurrentCandidate(b.metrics.tier, b.load, b.metrics.distance,
+              a.metrics.tier, a.load, a.metrics.distance, policy)
+          : this.compareRoutingCandidate(b.metrics, a.metrics, policy);
+        return better ? -1 : worse ? 1 : a.index - b.index;
+      });
+      // An eligible idle assignment can be the only route even with no fallback.
+      selectedEmail = ranked[0]?.email ?? selectedEmail;
+      selectedScore = ranked[0]?.metrics.hybridScore ?? selectedScore;
     }
 
     const availableCandidates = diagnostics.filter(
@@ -2032,6 +2081,12 @@ export class AccountRotator {
     } else if (policy === "hybrid") {
       reason = `Best route is ${selectedEmail} using hybrid score ${selectedScore.toFixed(1)}.`;
     }
+    if (concreteModel) {
+      reason = ranked.length > 0
+        ? `Eligible fallback ranking using ${concurrent ? "concurrent load/cursor" : policy} (snapshot, not guaranteed scheduling).`
+        : availableCandidates > 0 ? "No eligible fallback beyond the current assignment."
+          : `No eligible account for this model. ${this.summarizeRoutingRejections(diagnostics).join("; ")}`;
+    }
 
     return {
       modelKey,
@@ -2040,6 +2095,10 @@ export class AccountRotator {
       reason,
       availableCandidates,
       rejectedCandidates,
+      ...(concreteModel ? {
+        rankedAccountIds: ranked.map((candidate) => candidate.id),
+        rankingMode: concurrent ? "concurrent" as const : "rotation" as const,
+      } : {}),
       accounts: diagnostics,
     };
   }
@@ -2053,15 +2112,27 @@ export class AccountRotator {
     signal?: AbortSignal,
     providerId?: string,
   ): Promise<AccountRuntime | null> {
+    const account = await this.admitAccount(model, signal, providerId);
+    if (account && model) this.observeAppAdmission(account, model, providerId);
+    return account;
+  }
+
+  private observeAppAdmission(account: AccountRuntime, model: string, providerId?: string): void {
+    const provider = providerId ?? getProviderIdForPoolKey(this.resolveRequestPoolKey(model));
+    if (!APP_ROUTE_PROVIDERS[provider]) return;
+    const key = `${provider}:${model}`;
+    const workers = this.appRouteWorkers.get(account) ?? {};
+    workers[key] = (workers[key] ?? 0) + 1;
+    this.appRouteWorkers.set(account, workers);
+    this.appRouteAssignments.set(key, account);
+  }
+
+  private async admitAccount(model?: string, signal?: AbortSignal, providerId?: string): Promise<AccountRuntime | null> {
     if (signal?.aborted) return null;
     const queueKey = this.getRequestQueueKey(model, providerId);
-    if (
-      this.hasQueuedRequest(queueKey) ||
-      this.isConcurrencySaturated(model, providerId)
-    ) {
+    if (this.hasQueuedRequest(queueKey) || this.isConcurrencySaturated(model, providerId)) {
       return this.enqueueAccountRequest(model, signal, queueKey, providerId);
     }
-
     const account = await this.tryGetActiveAccount(model, providerId);
     if (account || !this.isConcurrencySaturated(model, providerId)) return account;
     return this.enqueueAccountRequest(model, signal, queueKey, providerId);
@@ -3705,6 +3776,12 @@ export class AccountRotator {
     if (modelKey) {
       const previous = account.inFlightByModel[modelKey] ?? 0;
       account.inFlightByModel[modelKey] = 0;
+      const workers = this.appRouteWorkers.get(account);
+      for (const route of Object.keys(workers ?? {})) {
+        const provider = route.slice(0, route.indexOf(":"));
+        const model = route.slice(provider.length + 1);
+        if (this.resolveRequestPoolKey(model, provider) === modelKey) delete workers![route];
+      }
       this.recalculateInFlightRequests(account);
       this.log(
         `${email}: operator cleared ${previous} in-flight request(s) for ${modelKey}`,
@@ -3716,6 +3793,7 @@ export class AccountRotator {
     const previous = account.inFlightRequests;
     account.inFlightRequests = 0;
     account.inFlightByModel = {};
+    this.appRouteWorkers.delete(account);
     this.log(
       `${email}: operator cleared ${previous} in-flight request(s)`,
       "warn",
@@ -3980,7 +4058,14 @@ export class AccountRotator {
     this.consumeTokenBucket(account, Date.now());
   }
 
-  finishRequest(account: AccountRuntime, modelKey?: string): void {
+  finishRequest(account: AccountRuntime, modelKey?: string, concreteModel?: string, concreteProvider?: string): void {
+    const workers = this.appRouteWorkers.get(account);
+    const route = concreteModel
+      ? `${concreteProvider ?? getProviderIdForPoolKey(modelKey ?? concreteModel)}:${concreteModel}`
+      : modelKey;
+    if (route && workers?.[route]) {
+      if (--workers[route] === 0) delete workers[route];
+    }
     const key = modelKey ?? "__default__";
     const providerId = this.ollamaModels.has(key) ? "ollama" : getProviderIdForPoolKey(key);
     const pending = this.customQuotaPending.get(account);
@@ -4368,6 +4453,28 @@ export class AccountRotator {
         now,
       );
     }
+    const modelRoutes: ModelRouteStatus[] = [];
+    for (const model of diagnosticCatalog) {
+      if (!APP_ROUTE_PROVIDERS[model.providerId] || model.offReason !== null ||
+        !this.accounts.some((account) => hasCredential(account.config, model.providerId))) continue;
+      const poolKey = this.resolveRequestPoolKey(model.id, model.providerId);
+      const diagnosticKey = `${model.providerId}:${model.id}`;
+      const diagnostics = this.buildRoutingDiagnostics(poolKey, now, model.id);
+      routingDiagnostics[diagnosticKey] = diagnostics;
+      const observedAssignment = this.appRouteAssignments.get(diagnosticKey);
+      const assigned = observedAssignment && this.accounts.includes(observedAssignment)
+        ? observedAssignment
+        : poolKey === diagnosticKey ? this.accounts[this.modelState.get(poolKey)?.activeAccountIndex ?? -1] : undefined;
+      const assignedDiagnostic = assigned && diagnostics.accounts.find((entry) => entry.id === getAccountIdentity(assigned));
+      modelRoutes.push({
+        modelId: model.id, providerId: model.providerId, poolKey, diagnosticKey,
+        servingAccountIds: this.accounts.filter((account) =>
+          (this.appRouteWorkers.get(account)?.[diagnosticKey] ?? 0) > 0 ||
+          (poolKey === diagnosticKey && (account.inFlightByModel[poolKey] ?? 0) > 0),
+        ).map(getAccountIdentity),
+        assignedAccountId: assignedDiagnostic && !assignedDiagnostic.rejectedReason ? assignedDiagnostic.id! : null,
+      });
+    }
     this.routingDiagnostics = routingDiagnostics;
 
     const updateInfo = getUpdateInfo();
@@ -4404,6 +4511,7 @@ export class AccountRotator {
       maxConcurrentRequestsPerAccount:
         this.config.maxConcurrentRequestsPerAccount ?? 5,
       activeAccounts,
+      modelRoutes,
       totalRequestsAllAccounts: this.accounts.reduce(
         (sum, a) => sum + a.totalRequests,
         0,

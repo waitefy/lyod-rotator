@@ -59,6 +59,10 @@ The Overview answers whether routing works and for how long:
 
 Expanding a model row shows the routing decision for that pool: the active policy and, for every candidate account, its status, quota, health, score and why it was selected, eligible or rejected.
 
+For **ChatGPT App, Claude App, Qwen App and DeepSeek App**, Providers keeps one row per provider with an explicit model selector. **Serving** lists all accounts with admitted requests still in flight for that selected model, even if an account has since reached its concurrency limit. An **Idle assignment** is not serving traffic. **Next up** lists eligible fallback accounts in the server's routing-policy order (or concurrent load/cursor order while requests are in flight), not HTTP requests waiting in a queue or a promise of the next admission. Disabled, cooling-down, exhausted-budget and unavailable model/auth candidates are excluded. Model availability uses existing local session/catalog evidence; opening the dashboard never generates requests or actively probes App bridges. A currently serving account can also be a candidate when it has spare capacity; an idle assignment is excluded from its own rotation fallback list.
+
+App native usage quotas are unavailable. **Local budget** retains the existing provider-wide meter counting successful requests through this rotator, independently of the selected model. Selecting another model changes Serving and Next up, not the provider's budget. Native Antigravity and Gemini quota pools keep their existing pooled view. Account links and the privacy mask apply to both Serving and Next up, including on narrow screens.
+
 ![Model routing decisions](images/dashboard-models.png)
 
 ## Accounts

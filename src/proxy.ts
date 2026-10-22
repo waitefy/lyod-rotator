@@ -1373,7 +1373,7 @@ export async function withRotation<T>(
     const releaseCurrentAccount = (): void => {
       if (accountReleased) return;
       accountReleased = true;
-      rotator.finishRequest(account, modelKey);
+      rotator.finishRequest(account, modelKey, model, providerId);
     };
     const rotateAndRelease = async (): Promise<AccountRuntime | null> => {
       releaseCurrentAccount();
@@ -1923,7 +1923,7 @@ async function handleProxyRequest(
     const releaseCurrentAccount = (): void => {
       if (accountReleased) return;
       accountReleased = true;
-      rotator.finishRequest(account, modelKey);
+      rotator.finishRequest(account, modelKey, body.model, providerId);
     };
     const rotateAndRelease = async (): Promise<AccountRuntime | null> => {
       releaseCurrentAccount();
